@@ -1,6 +1,6 @@
 # Salon appointment booking
 
-An Express + MySQL booking API with a small React client for browsing services, booking appointments, and managing salon data.
+An Express + MySQL booking API with a small React + Bootstrap 5 client for browsing services, booking appointments, and managing salon data.
 
 ## Run locally
 
@@ -48,7 +48,7 @@ All routes are prefixed with `/api`. The interactive frontend is a demo client; 
 | GET | `/profile` | Signed in | Read current profile |
 | PATCH | `/profile` | Signed in | Update `name`, `phone`, or `preferences` |
 
-Send `Authorization: Bearer <token>` on protected routes. Passwords are hashed, access tokens expire after `JWT_EXPIRES_IN` (12h by default), and the signing secret is required at startup.
+Send `Authorization: Bearer <token>` on protected routes. Passwords are hashed, access tokens expire after `JWT_EXPIRES_IN` (12h by default), and the signing secret is required at startup. Registration and login share a per-IP limit of 10 attempts per 15 minutes.
 
 ### Services, staff, and availability
 
@@ -92,7 +92,7 @@ Bookings are checked against staff skills, working hours, and overlapping reserv
 | GET | `/admin/users` | Admin | List users |
 | PATCH | `/admin/users/:id` | Admin | Update a user's `name` or `role` |
 
-Responses are JSON. Error responses use `{ "error": "..." }`; common status codes are 400 (invalid input), 401 (missing/invalid token), 403 (not allowed), 404 (not found), 409 (booking conflict/policy), and 503 (optional integration not configured).
+Responses are JSON. Error responses use `{ "error": "..." }`; common status codes are 400 (invalid input), 401 (missing/invalid token), 403 (not allowed), 404 (not found), 409 (booking conflict/policy), 429 (auth rate limit), and 503 (optional integration not configured).
 
 ## Notes
 

@@ -34,6 +34,7 @@ paths:
       responses:
         '201': { description: Account and JWT created }
         '409': { description: Email is already registered }
+        '429': { description: Authentication rate limit reached }
   /auth/login:
     post:
       security: []
@@ -51,6 +52,7 @@ paths:
       responses:
         '200': { description: JWT and profile }
         '401': { description: Invalid credentials }
+        '429': { description: Authentication rate limit reached }
   /profile:
     get:
       summary: Get the authenticated user's profile

@@ -1,7 +1,9 @@
 require('dotenv').config();
+process.env.TZ = process.env.SALON_TIMEZONE || 'UTC';
 
 const express = require('express');
 const cors = require('cors');
+const { rateLimit } = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const mysql = require('mysql2/promise');
@@ -35,6 +37,13 @@ const mailTransport = process.env.SMTP_HOST
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
   : null;
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many authentication attempts. Try again in 15 minutes.' },
+});
 
 const schema = [
   `CREATE TABLE IF NOT EXISTS users (
@@ -141,7 +150,23 @@ const parseId = (value) => {
   if (!Number.isSafeInteger(id) || id < 1) throw fail(400, 'A valid ID is required.');
   return id;
 };
-const isDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+const isDate = (value) => {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+};
+const salonToday = () => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: process.env.SALON_TIMEZONE || 'UTC',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date()).reduce((values, part) => {
+    if (part.type !== 'literal') values[part.type] = part.value;
+    return values;
+  }, {});
+  return `${parts.year}-${parts.month}-${parts.day}`;
+};
 const toMinutes = (value) => {
   if (typeof value !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(value)) {
     throw fail(400, 'Time must use HH:MM format.');
@@ -179,9 +204,10 @@ const toPublicUser = (user) => ({
 const sendEmail = async ({ to, subject, text }) => {
   if (!mailTransport || !process.env.SMTP_FROM) {
     console.warn(`Email not sent (SMTP is not configured): ${subject} -> ${to}`);
-    return;
+    return false;
   }
   await mailTransport.sendMail({ from: process.env.SMTP_FROM, to, subject, text });
+  return true;
 };
 const notifyBooking = async (appointment, kind = 'confirmed') => {
   const [rows] = await pool.execute(
@@ -214,18 +240,31 @@ const transaction = async (callback) => {
   }
 };
 
-app.use(cors({ origin: process.env.FRONTEND_ORIGIN || true }));
+app.use(cors({ origin: process.env.FRONTEND_ORIGIN || 'http://localhost:5173' }));
 app.use((req, res, next) => {
   if (req.originalUrl === '/api/payments/webhook') return next();
-  return express.json({ limit: '1mb' })(req, res, next);
+  return express.json({ limit: '1mb' })(req, res, (error) => {
+    if (error) return next(error);
+    req.body = req.body || {};
+    return next();
+  });
 });
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 
-app.post('/api/auth/register', asyncRoute(async (req, res) => {
+app.post('/api/auth/register', authLimiter, asyncRoute(async (req, res) => {
   const { name, email, password, phone } = req.body;
-  if (!name?.trim() || !email?.trim() || !password) throw fail(400, 'Name, email, and password are required.');
-  if (password.length < 8) throw fail(400, 'Password must be at least 8 characters.');
+  if (typeof name !== 'string' || !name.trim() || typeof email !== 'string' || !email.trim() || typeof password !== 'string') {
+    throw fail(400, 'Name, email, and password are required.');
+  }
+  if (name.trim().length > 120 || email.trim().length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    throw fail(400, 'Enter a valid name and email address.');
+  }
+  const passwordBytes = Buffer.byteLength(password, 'utf8');
+  if (passwordBytes < 8 || passwordBytes > 72) throw fail(400, 'Password must be 8-72 UTF-8 bytes long.');
+  if (phone !== undefined && phone !== null && (typeof phone !== 'string' || phone.length > 32)) {
+    throw fail(400, 'Phone must be at most 32 characters.');
+  }
   const normalizedEmail = email.trim().toLowerCase();
   const passwordHash = await bcrypt.hash(password, 12);
   const [result] = await pool.execute(
@@ -237,9 +276,11 @@ app.post('/api/auth/register', asyncRoute(async (req, res) => {
   res.status(201).json({ token, user: toPublicUser(user) });
 }));
 
-app.post('/api/auth/login', asyncRoute(async (req, res) => {
+app.post('/api/auth/login', authLimiter, asyncRoute(async (req, res) => {
   const { email, password } = req.body;
-  if (!email || !password) throw fail(400, 'Email and password are required.');
+  if (typeof email !== 'string' || !email.trim() || typeof password !== 'string' || !password) {
+    throw fail(400, 'Email and password are required.');
+  }
   const [rows] = await pool.execute('SELECT * FROM users WHERE email = ?', [email.trim().toLowerCase()]);
   if (!rows[0] || !(await bcrypt.compare(password, rows[0].password_hash))) {
     throw fail(401, 'Email or password is incorrect.');
@@ -257,8 +298,8 @@ app.get('/api/profile', authenticate, asyncRoute(async (req, res) => {
 
 app.patch('/api/profile', authenticate, asyncRoute(async (req, res) => {
   const { name, phone, preferences } = req.body;
-  if (name !== undefined && (!name.trim() || name.trim().length > 120)) throw fail(400, 'Name must be between 1 and 120 characters.');
-  if (phone !== undefined && phone !== null && typeof phone !== 'string') throw fail(400, 'Phone must be a string.');
+  if (name !== undefined && (typeof name !== 'string' || !name.trim() || name.trim().length > 120)) throw fail(400, 'Name must be between 1 and 120 characters.');
+  if (phone !== undefined && phone !== null && (typeof phone !== 'string' || phone.length > 32)) throw fail(400, 'Phone must be at most 32 characters.');
   if (preferences !== undefined && (!preferences || typeof preferences !== 'object' || Array.isArray(preferences))) {
     throw fail(400, 'Preferences must be an object.');
   }
@@ -282,7 +323,9 @@ app.get('/api/services', asyncRoute(async (_req, res) => {
 
 app.post('/api/services', authenticate, allowRoles('admin'), asyncRoute(async (req, res) => {
   const { name, description = '', durationMinutes, price } = req.body;
-  if (!name?.trim() || !Number.isInteger(durationMinutes) || durationMinutes < 5 || !Number.isFinite(Number(price)) || Number(price) < 0) {
+  if (typeof name !== 'string' || !name.trim() || name.trim().length > 120 ||
+      typeof description !== 'string' || !Number.isInteger(durationMinutes) || durationMinutes < 5 ||
+      !Number.isFinite(Number(price)) || Number(price) < 0) {
     throw fail(400, 'Name, a duration of at least 5 minutes, and a non-negative price are required.');
   }
   const [result] = await pool.execute(
@@ -295,14 +338,20 @@ app.post('/api/services', authenticate, allowRoles('admin'), asyncRoute(async (r
 app.patch('/api/services/:id', authenticate, allowRoles('admin'), asyncRoute(async (req, res) => {
   const id = parseId(req.params.id);
   const { name, description, durationMinutes, price, active } = req.body;
-  const [result] = await pool.execute(
+  if (name !== undefined && (typeof name !== 'string' || !name.trim())) throw fail(400, 'Service name cannot be empty.');
+  if (name !== undefined && name.trim().length > 120) throw fail(400, 'Service name must be at most 120 characters.');
+  if (description !== undefined && description !== null && typeof description !== 'string') throw fail(400, 'Description must be a string.');
+  if (durationMinutes !== undefined && (!Number.isInteger(durationMinutes) || durationMinutes < 5)) throw fail(400, 'Duration must be at least 5 minutes.');
+  if (price !== undefined && (!Number.isFinite(Number(price)) || Number(price) < 0)) throw fail(400, 'Price must be a non-negative number.');
+  if (active !== undefined && typeof active !== 'boolean') throw fail(400, 'Active must be a boolean.');
+  await pool.execute(
     `UPDATE services SET name = COALESCE(?, name), description = COALESCE(?, description),
      duration_minutes = COALESCE(?, duration_minutes), price = COALESCE(?, price), active = COALESCE(?, active)
      WHERE id = ?`,
     [name?.trim() || null, description ?? null, durationMinutes ?? null, price ?? null, active ?? null, id],
   );
-  if (!result.affectedRows) throw fail(404, 'Service not found.');
   const [rows] = await pool.execute('SELECT id, name, description, duration_minutes, price, active FROM services WHERE id = ?', [id]);
+  if (!rows[0]) throw fail(404, 'Service not found.');
   res.json(rows[0]);
 }));
 
@@ -329,7 +378,10 @@ app.get('/api/staff', asyncRoute(async (_req, res) => {
 
 app.post('/api/staff', authenticate, allowRoles('admin'), asyncRoute(async (req, res) => {
   const { name, bio = '', specializations = [], userId = null } = req.body;
-  if (!name?.trim() || !Array.isArray(specializations)) throw fail(400, 'Name and a specializations array are required.');
+  if (typeof name !== 'string' || !name.trim() || name.trim().length > 120 ||
+      typeof bio !== 'string' || !Array.isArray(specializations)) {
+    throw fail(400, 'Name, bio, and a specializations array are required.');
+  }
   const [result] = await pool.execute(
     'INSERT INTO staff (name, bio, specializations, user_id) VALUES (?, ?, ?, ?)',
     [name.trim(), bio, JSON.stringify(specializations), userId ? parseId(userId) : null],
@@ -340,18 +392,26 @@ app.post('/api/staff', authenticate, allowRoles('admin'), asyncRoute(async (req,
 app.patch('/api/staff/:id', authenticate, allowRoles('admin'), asyncRoute(async (req, res) => {
   const id = parseId(req.params.id);
   const { name, bio, specializations, active, userId } = req.body;
-  const [result] = await pool.execute(
+  if (name !== undefined && (typeof name !== 'string' || !name.trim())) throw fail(400, 'Staff name cannot be empty.');
+  if (name !== undefined && name.trim().length > 120) throw fail(400, 'Staff name must be at most 120 characters.');
+  if (bio !== undefined && bio !== null && typeof bio !== 'string') throw fail(400, 'Bio must be a string.');
+  if (specializations !== undefined && !Array.isArray(specializations)) throw fail(400, 'Specializations must be an array.');
+  if (active !== undefined && typeof active !== 'boolean') throw fail(400, 'Active must be a boolean.');
+  await pool.execute(
     `UPDATE staff SET name = COALESCE(?, name), bio = COALESCE(?, bio),
      specializations = COALESCE(?, specializations), active = COALESCE(?, active),
-     user_id = COALESCE(?, user_id) WHERE id = ?`,
+     user_id = IF(?, ?, user_id) WHERE id = ?`,
     [
       name?.trim() || null, bio ?? null,
       specializations === undefined ? null : JSON.stringify(specializations),
-      active ?? null, userId === undefined ? null : (userId === null ? null : parseId(userId)), id,
+      active ?? null,
+      userId === undefined ? false : true,
+      userId === undefined || userId === null ? null : parseId(userId),
+      id,
     ],
   );
-  if (!result.affectedRows) throw fail(404, 'Staff member not found.');
   const [rows] = await pool.execute('SELECT id, name, bio, specializations, active FROM staff WHERE id = ?', [id]);
+  if (!rows[0]) throw fail(404, 'Staff member not found.');
   res.json(rows[0]);
 }));
 
@@ -377,6 +437,7 @@ app.put('/api/staff/:id/availability', authenticate, allowRoles('admin'), asyncR
   const staffId = parseId(req.params.id);
   const { weekday, startTime, endTime, isAvailable = true } = req.body;
   if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) throw fail(400, 'Weekday must be 0 (Sunday) through 6 (Saturday).');
+  if (typeof isAvailable !== 'boolean') throw fail(400, 'isAvailable must be a boolean.');
   const start = toMinutes(startTime);
   const end = toMinutes(endTime);
   if (end <= start) throw fail(400, 'End time must be after start time.');
@@ -409,6 +470,8 @@ app.get('/api/availability', asyncRoute(async (req, res) => {
     [date],
   );
   const slots = [];
+  const now = new Date();
+  const currentMinute = now.getHours() * 60 + now.getMinutes();
   for (const schedule of staff) {
     const opening = toMinutes(schedule.start_time);
     const closing = toMinutes(schedule.end_time);
@@ -417,6 +480,7 @@ app.get('/api/availability', asyncRoute(async (req, res) => {
     }));
     for (let start = opening; start + schedule.duration_minutes <= closing; start += 15) {
       const end = start + schedule.duration_minutes;
+      if (date === salonToday() && start <= currentMinute) continue;
       if (!busy.some((item) => start < item.end && end > item.start)) {
         slots.push({ staffId: schedule.id, staffName: schedule.name, startTime: asTime(start).slice(0, 5), endTime: asTime(end).slice(0, 5) });
       }
@@ -431,7 +495,8 @@ app.post('/api/appointments', authenticate, asyncRoute(async (req, res) => {
   const staffId = parseId(req.body.staffId);
   const date = String(req.body.date || '');
   const start = toMinutes(req.body.startTime);
-  if (!isDate(date) || date < new Date().toISOString().slice(0, 10)) throw fail(400, 'Choose a valid date that is not in the past.');
+  if (req.body.notes !== undefined && typeof req.body.notes !== 'string') throw fail(400, 'Notes must be a string.');
+  if (!isDate(date) || date < salonToday()) throw fail(400, 'Choose a valid date that is not in the past.');
   const [services] = await pool.execute(
     `SELECT s.duration_minutes FROM services s JOIN staff_services ss ON ss.service_id = s.id
      JOIN staff st ON st.id = ss.staff_id WHERE s.id = ? AND s.active = TRUE AND st.id = ? AND st.active = TRUE`,
@@ -439,6 +504,9 @@ app.post('/api/appointments', authenticate, asyncRoute(async (req, res) => {
   );
   if (!services[0]) throw fail(400, 'This staff member is not available for the selected service.');
   const end = start + services[0].duration_minutes;
+  if (end > 24 * 60 || (date === salonToday() && start <= new Date().getHours() * 60 + new Date().getMinutes())) {
+    throw fail(400, 'Choose a future appointment time.');
+  }
   const appointment = await transaction(async (connection) => {
     await connection.execute('SELECT id FROM staff WHERE id = ? FOR UPDATE', [staffId]);
     const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
@@ -447,7 +515,7 @@ app.post('/api/appointments', authenticate, asyncRoute(async (req, res) => {
        AND start_time <= ? AND end_time >= ? LIMIT 1`,
       [staffId, weekday, asTime(start), asTime(end)],
     );
-    if (!availability[0]) throw fail(409, 'The selected time is outside this staff member’s working hours.');
+    if (!availability[0]) throw fail(409, "The selected time is outside this staff member's working hours.");
     const [conflicts] = await connection.execute(
       `SELECT id FROM appointments WHERE staff_id = ? AND appointment_date = ? AND status = 'confirmed'
        AND start_time < ? AND end_time > ? LIMIT 1`,
@@ -502,7 +570,7 @@ app.patch('/api/appointments/:id/reschedule', authenticate, asyncRoute(async (re
   const id = parseId(req.params.id);
   const date = String(req.body.date || '');
   const start = toMinutes(req.body.startTime);
-  if (!isDate(date) || date < new Date().toISOString().slice(0, 10)) throw fail(400, 'Choose a valid date that is not in the past.');
+  if (!isDate(date) || date < salonToday()) throw fail(400, 'Choose a valid date that is not in the past.');
   const [existingRows] = await pool.execute('SELECT * FROM appointments WHERE id = ?', [id]);
   const existing = existingRows[0];
   if (!existing) throw fail(404, 'Appointment not found.');
@@ -512,27 +580,33 @@ app.patch('/api/appointments/:id/reschedule', authenticate, asyncRoute(async (re
   if (new Date(`${existing.appointment_date}T${existing.start_time}`) - Date.now() < cutoff * 3600000) {
     throw fail(409, `Appointments can only be changed at least ${cutoff} hours in advance.`);
   }
-  const end = start + existing.end_time.split(':').reduce((minutes, part, index) => minutes + Number(part) * (index === 0 ? 60 : index === 1 ? 1 : 1 / 60), 0)
-    - existing.start_time.split(':').reduce((minutes, part, index) => minutes + Number(part) * (index === 0 ? 60 : index === 1 ? 1 : 1 / 60), 0);
+  const duration = toMinutes(existing.end_time) - toMinutes(existing.start_time);
+  if (start + duration > 24 * 60 || (date === salonToday() && start <= new Date().getHours() * 60 + new Date().getMinutes())) {
+    throw fail(400, 'Choose a future appointment time.');
+  }
   const updated = await transaction(async (connection) => {
+    const [lockedAppointment] = await connection.execute('SELECT status FROM appointments WHERE id = ? FOR UPDATE', [id]);
+    if (!lockedAppointment[0] || lockedAppointment[0].status !== 'confirmed') {
+      throw fail(409, 'Only confirmed appointments can be rescheduled.');
+    }
     await connection.execute('SELECT id FROM staff WHERE id = ? FOR UPDATE', [existing.staff_id]);
     const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
     const [availability] = await connection.execute(
       `SELECT id FROM staff_availability WHERE staff_id = ? AND weekday = ? AND is_available = TRUE
        AND start_time <= ? AND end_time >= ? LIMIT 1`,
-      [existing.staff_id, weekday, asTime(start + end), asTime(start)],
+      [existing.staff_id, weekday, asTime(start + duration), asTime(start)],
     );
-    if (!availability[0]) throw fail(409, 'The selected time is outside this staff member’s working hours.');
+    if (!availability[0]) throw fail(409, "The selected time is outside this staff member's working hours.");
     const [conflicts] = await connection.execute(
       `SELECT id FROM appointments WHERE id <> ? AND staff_id = ? AND appointment_date = ? AND status = 'confirmed'
        AND start_time < ? AND end_time > ? LIMIT 1`,
-      [id, existing.staff_id, date, asTime(start + end), asTime(start)],
+      [id, existing.staff_id, date, asTime(start + duration), asTime(start)],
     );
     if (conflicts[0]) throw fail(409, 'That time slot is already booked.');
     await connection.execute('UPDATE appointments SET appointment_date = ?, start_time = ?, end_time = ? WHERE id = ?', [
-      date, asTime(start), asTime(start + end), id,
+      date, asTime(start), asTime(start + duration), id,
     ]);
-    return { id, appointment_date: date, start_time: asTime(start), end_time: asTime(start + end), status: 'confirmed' };
+    return { id, appointment_date: date, start_time: asTime(start), end_time: asTime(start + duration), status: 'confirmed' };
   });
   await notifyBooking(updated, 'rescheduled').catch((error) => console.error('Reschedule email failed:', error.message));
   res.json(updated);
@@ -558,8 +632,9 @@ app.patch('/api/appointments/:id/status', authenticate, allowRoles('admin'), asy
   const id = parseId(req.params.id);
   const { status } = req.body;
   if (!['confirmed', 'cancelled', 'completed'].includes(status)) throw fail(400, 'Status must be confirmed, cancelled, or completed.');
-  const [result] = await pool.execute('UPDATE appointments SET status = ? WHERE id = ?', [status, id]);
-  if (!result.affectedRows) throw fail(404, 'Appointment not found.');
+  await pool.execute('UPDATE appointments SET status = ? WHERE id = ?', [status, id]);
+  const [rows] = await pool.execute('SELECT id FROM appointments WHERE id = ?', [id]);
+  if (!rows[0]) throw fail(404, 'Appointment not found.');
   res.json({ id, status });
 }));
 
@@ -661,13 +736,16 @@ app.patch('/api/reviews/:id/response', authenticate, allowRoles('admin', 'staff'
   const response = req.body.response?.trim();
   if (!response) throw fail(400, 'A response is required.');
   if (req.user.role === 'staff') {
-    const [owned] = await pool.execute('SELECT id FROM staff WHERE id = (SELECT id FROM staff WHERE user_id = ?)', [req.user.id]);
+    const [owned] = await pool.execute('SELECT id FROM staff WHERE user_id = ?', [req.user.id]);
     if (!owned.length) throw fail(403, 'Your account is not linked to a staff profile.');
     const [review] = await pool.execute('SELECT id FROM reviews WHERE id = ? AND staff_id = ?', [id, owned[0].id]);
     if (!review.length) throw fail(403, 'You can only respond to reviews for your profile.');
   }
   const [result] = await pool.execute('UPDATE reviews SET staff_response = ? WHERE id = ?', [response, id]);
-  if (!result.affectedRows) throw fail(404, 'Review not found.');
+  if (!result.affectedRows) {
+    const [review] = await pool.execute('SELECT id FROM reviews WHERE id = ?', [id]);
+    if (!review[0]) throw fail(404, 'Review not found.');
+  }
   res.json({ id, response });
 }));
 
@@ -680,16 +758,18 @@ app.patch('/api/admin/users/:id', authenticate, allowRoles('admin'), asyncRoute(
   const id = parseId(req.params.id);
   const { role, name } = req.body;
   if (role !== undefined && !['customer', 'staff', 'admin'].includes(role)) throw fail(400, 'Role must be customer, staff, or admin.');
-  const [result] = await pool.execute('UPDATE users SET role = COALESCE(?, role), name = COALESCE(?, name) WHERE id = ?', [role ?? null, name?.trim() || null, id]);
-  if (!result.affectedRows) throw fail(404, 'User not found.');
-  res.json(await getUser(id));
+  if (name !== undefined && (typeof name !== 'string' || !name.trim())) throw fail(400, 'User name cannot be empty.');
+  await pool.execute('UPDATE users SET role = COALESCE(?, role), name = COALESCE(?, name) WHERE id = ?', [role ?? null, name?.trim() || null, id]);
+  const user = await getUser(id);
+  if (!user) throw fail(404, 'User not found.');
+  res.json(toPublicUser(user));
 }));
 
 app.use((req, _res, next) => next(fail(404, `Route not found: ${req.method} ${req.path}`)));
 app.use((error, _req, res, _next) => {
   if (error.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'A record with that value already exists.' });
   if (error.code === 'ER_NO_REFERENCED_ROW_2') return res.status(404).json({ error: 'A referenced record was not found.' });
-  console.error(error);
+  if (!error.status || error.status >= 500) console.error(error);
   res.status(error.status || 500).json({ error: error.status ? error.message : 'An unexpected server error occurred.' });
 });
 
@@ -701,6 +781,10 @@ async function initializeSchema() {
 }
 
 function startReminderJob() {
+  if (!mailTransport || !process.env.SMTP_FROM) {
+    console.warn('Appointment reminders are disabled because SMTP is not configured.');
+    return;
+  }
   cron.schedule('*/15 * * * *', async () => {
     try {
       const [rows] = await pool.execute(
