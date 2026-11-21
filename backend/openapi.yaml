@@ -1,0 +1,401 @@
+openapi: 3.0.3
+info:
+  title: Salon Appointment Booking API
+  version: 1.0.0
+  description: Express/MySQL salon scheduling API. Protected endpoints require a bearer JWT.
+servers:
+  - url: http://localhost:4000/api
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      security: []
+      summary: API liveness check
+      responses:
+        '200':
+          description: API is running
+  /auth/register:
+    post:
+      security: []
+      summary: Register a customer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              properties:
+                name: { type: string, maxLength: 120 }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                phone: { type: string }
+      responses:
+        '201': { description: Account and JWT created }
+        '409': { description: Email is already registered }
+  /auth/login:
+    post:
+      security: []
+      summary: Login with email and password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200': { description: JWT and profile }
+        '401': { description: Invalid credentials }
+  /profile:
+    get:
+      summary: Get the authenticated user's profile
+      responses:
+        '200': { description: User profile }
+    patch:
+      summary: Update profile fields
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                phone: { type: string, nullable: true }
+                preferences: { type: object }
+      responses:
+        '200': { description: Updated profile }
+  /services:
+    get:
+      security: []
+      summary: List active services
+      responses:
+        '200': { description: Service list }
+    post:
+      summary: Create a service (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, durationMinutes, price]
+              properties:
+                name: { type: string }
+                description: { type: string }
+                durationMinutes: { type: integer, minimum: 5 }
+                price: { type: number, minimum: 0 }
+      responses:
+        '201': { description: Created service }
+  /services/{id}:
+    patch:
+      summary: Update service (admin)
+      parameters:
+        - $ref: '#/components/parameters/id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+                durationMinutes: { type: integer }
+                price: { type: number }
+                active: { type: boolean }
+      responses:
+        '200': { description: Updated service }
+    delete:
+      summary: Deactivate service (admin)
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '204': { description: Service deactivated }
+  /staff:
+    get:
+      security: []
+      summary: List active staff and their services
+      responses:
+        '200': { description: Staff list }
+    post:
+      summary: Create staff profile (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                bio: { type: string }
+                specializations: { type: array, items: { type: string } }
+                userId: { type: integer, nullable: true }
+      responses:
+        '201': { description: Created staff profile }
+  /staff/{id}:
+    patch:
+      summary: Update staff profile (admin)
+      parameters:
+        - $ref: '#/components/parameters/id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                bio: { type: string }
+                specializations: { type: array, items: { type: string } }
+                active: { type: boolean }
+                userId: { type: integer, nullable: true }
+      responses:
+        '200': { description: Updated staff profile }
+    delete:
+      summary: Deactivate staff profile (admin)
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '204': { description: Staff profile deactivated }
+  /staff/{id}/services/{serviceId}:
+    put:
+      summary: Assign a service to staff (admin)
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - name: serviceId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '204': { description: Service assigned }
+    delete:
+      summary: Remove a staff service assignment (admin)
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - name: serviceId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '204': { description: Service assignment removed }
+  /staff/{id}/availability:
+    put:
+      summary: Set a weekly staff availability period (admin)
+      parameters:
+        - $ref: '#/components/parameters/id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [weekday, startTime, endTime]
+              properties:
+                weekday: { type: integer, minimum: 0, maximum: 6, description: Sunday is 0 }
+                startTime: { type: string, example: '09:00' }
+                endTime: { type: string, example: '17:00' }
+                isAvailable: { type: boolean, default: true }
+      responses:
+        '204': { description: Availability saved }
+  /availability:
+    get:
+      security: []
+      summary: Find available appointment slots
+      parameters:
+        - name: serviceId
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: date
+          in: query
+          required: true
+          schema: { type: string, format: date }
+        - name: staffId
+          in: query
+          schema: { type: integer }
+      responses:
+        '200': { description: Available 15-minute-start slots }
+  /appointments:
+    get:
+      summary: List appointments (customers see their own)
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [confirmed, cancelled, completed] }
+      responses:
+        '200': { description: Appointment list }
+    post:
+      summary: Book an appointment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [serviceId, staffId, date, startTime]
+              properties:
+                serviceId: { type: integer }
+                staffId: { type: integer }
+                date: { type: string, format: date }
+                startTime: { type: string, example: '09:00' }
+                notes: { type: string }
+      responses:
+        '201': { description: Booking confirmed }
+        '409': { description: Slot conflict or outside working hours }
+  /appointments/{id}:
+    get:
+      summary: Get appointment details
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200': { description: Appointment details }
+        '404': { description: Appointment not found }
+  /appointments/{id}/reschedule:
+    patch:
+      summary: Reschedule a confirmed appointment
+      parameters:
+        - $ref: '#/components/parameters/id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date, startTime]
+              properties:
+                date: { type: string, format: date }
+                startTime: { type: string, example: '10:30' }
+      responses:
+        '200': { description: Appointment rescheduled }
+        '409': { description: Conflict or policy cutoff }
+  /appointments/{id}/cancel:
+    patch:
+      summary: Cancel an appointment
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200': { description: Appointment cancelled }
+        '409': { description: Appointment cannot be cancelled }
+  /appointments/{id}/status:
+    patch:
+      summary: Update appointment status (admin)
+      parameters:
+        - $ref: '#/components/parameters/id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [confirmed, cancelled, completed] }
+      responses:
+        '200': { description: Status updated }
+  /appointments/{id}/checkout:
+    post:
+      summary: Create a Stripe Checkout session
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '201': { description: Checkout URL }
+        '503': { description: Stripe is not configured }
+  /appointments/{id}/invoice:
+    get:
+      summary: Get or create invoice for a completed appointment
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200': { description: Invoice details }
+        '409': { description: Appointment is not completed }
+  /appointments/{id}/reviews:
+    post:
+      summary: Review a completed appointment
+      parameters:
+        - $ref: '#/components/parameters/id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rating]
+              properties:
+                rating: { type: integer, minimum: 1, maximum: 5 }
+                comment: { type: string }
+      responses:
+        '201': { description: Review created }
+        '409': { description: Appointment is not completed }
+  /reviews:
+    get:
+      security: []
+      summary: List public reviews
+      parameters:
+        - name: staffId
+          in: query
+          schema: { type: integer }
+      responses:
+        '200': { description: Reviews }
+  /reviews/{id}/response:
+    patch:
+      summary: Respond to a review (admin or linked staff)
+      parameters:
+        - $ref: '#/components/parameters/id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [response]
+              properties:
+                response: { type: string }
+      responses:
+        '200': { description: Response saved }
+  /admin/users:
+    get:
+      summary: List users (admin)
+      responses:
+        '200': { description: Users }
+  /admin/users/{id}:
+    patch:
+      summary: Update user name or role (admin)
+      parameters:
+        - $ref: '#/components/parameters/id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                role: { type: string, enum: [customer, staff, admin] }
+      responses:
+        '200': { description: Updated user }
+  /payments/webhook:
+    post:
+      security: []
+      summary: Receive verified Stripe Checkout events
+      responses:
+        '200': { description: Webhook accepted }
+        '400': { description: Signature invalid }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
