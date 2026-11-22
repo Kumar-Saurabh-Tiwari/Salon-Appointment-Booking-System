@@ -2,9 +2,38 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000/api'
-const today = new Date().toLocaleDateString('en-CA')
-const tomorrow = new Date(Date.now() + 86400000).toLocaleDateString('en-CA')
+function toLocalDateString(date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+const today = toLocalDateString(new Date())
+const tomorrow = toLocalDateString(new Date(Date.now() + 86400000))
 const categoryOrder = ['Hair', 'Nails', 'Hair removal', 'Brows & lashes', 'Facials & skincare', 'Massage', 'Makeup', 'Medspa & aesthetics']
+let cashfreeSdkPromise
+
+function formatCurrency(value, currency) {
+  return new Intl.NumberFormat('en-IN', { style: 'currency', currency }).format(Number(value) || 0)
+}
+
+function loadCashfreeSdk() {
+  if (window.Cashfree) return Promise.resolve(window.Cashfree)
+  if (!cashfreeSdkPromise) {
+    cashfreeSdkPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script')
+      script.src = 'https://sdk.cashfree.com/js/v3/cashfree.js'
+      script.async = true
+      script.onload = () => resolve(window.Cashfree)
+      script.onerror = () => reject(new Error('Could not load Cashfree checkout. Check your connection and try again.'))
+      document.head.appendChild(script)
+    }).catch((error) => {
+      cashfreeSdkPromise = null
+      throw error
+    })
+  }
+  return cashfreeSdkPromise
+}
 
 function getServiceCategory(service) {
   const text = `${service.name} ${service.description || ''}`.toLowerCase()
@@ -42,6 +71,12 @@ function friendlyErrorMessage(error) {
   if (/failed to fetch|networkerror|load failed/i.test(message || '')) {
     return 'We couldn’t reach the salon just now. Check your connection and try again.'
   }
+  if (/10-digit phone|valid phone|phone number/i.test(message || '')) {
+    return 'Add a valid 10-digit phone number to your profile before opening Cashfree.'
+  }
+  if (/payment.*(details?|information).*required|required.*payment/i.test(message || '')) {
+    return 'Please complete the payment details shown in the Cashfree checkout, then try again.'
+  }
   return message || 'Something went wrong. Please try again.'
 }
 
@@ -58,6 +93,7 @@ function App() {
   const [users, setUsers] = useState([])
   const [adminSummary, setAdminSummary] = useState(null)
   const [reviews, setReviews] = useState([])
+  const [paymentConfig, setPaymentConfig] = useState({ currency: 'INR' })
   const [serviceId, setServiceId] = useState('')
   const [staffId, setStaffId] = useState('')
   const [serviceSearch, setServiceSearch] = useState('')
@@ -94,15 +130,16 @@ function App() {
   }, [services, serviceSearch, serviceCategory])
 
   const fetchCatalog = useCallback(() => Promise.all([
-    api('/services'), api('/staff'), api('/reviews'),
+    api('/services'), api('/staff'), api('/reviews'), api('/payments/config'),
   ]), [])
 
   const loadCatalog = useCallback(async () => {
     try {
-      const [serviceList, staffList, reviewList] = await fetchCatalog()
+      const [serviceList, staffList, reviewList, config] = await fetchCatalog()
       setServices(serviceList)
       setStaff(staffList)
       setReviews(reviewList)
+      setPaymentConfig(config)
       setServiceId((current) => current || String(serviceList[0]?.id || ''))
     } catch (requestError) {
       showError(requestError)
@@ -120,11 +157,12 @@ function App() {
 
   useEffect(() => {
     let active = true
-    fetchCatalog().then(([serviceList, staffList, reviewList]) => {
+    fetchCatalog().then(([serviceList, staffList, reviewList, config]) => {
       if (!active) return
       setServices(serviceList)
       setStaff(staffList)
       setReviews(reviewList)
+      setPaymentConfig(config)
       setServiceId((current) => current || String(serviceList[0]?.id || ''))
     }).catch((requestError) => {
       if (active) showError(requestError)
@@ -148,6 +186,34 @@ function App() {
   }, [token, loadAppointments])
 
   useEffect(() => {
+    if (!serviceId) return
+    let active = true
+    async function findNextAvailableDate() {
+      for (let offset = 1; offset <= 21; offset += 1) {
+        const candidate = new Date()
+        candidate.setHours(12, 0, 0, 0)
+        candidate.setDate(candidate.getDate() + offset)
+        const candidateDate = toLocalDateString(candidate)
+        try {
+          const availableSlots = await api(`/availability?serviceId=${serviceId}&date=${candidateDate}${staffId ? `&staffId=${staffId}` : ''}`)
+          if (!active) return
+          if (availableSlots.length) {
+            setDate(candidateDate)
+            setSelectedSlot(null)
+            return
+          }
+        } catch (requestError) {
+          if (active) showError(requestError)
+          return
+        }
+      }
+      if (active) setDate(tomorrow)
+    }
+    findNextAvailableDate()
+    return () => { active = false }
+  }, [serviceId, staffId])
+
+  useEffect(() => {
     if (!serviceId || !date) return
     let active = true
     const requestedAvailabilityKey = `${serviceId}|${date}|${staffId}`
@@ -164,6 +230,37 @@ function App() {
       })
     return () => { active = false }
   }, [serviceId, staffId, date])
+
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    if (url.searchParams.get('payment') !== 'cashfree_return' || !token) return undefined
+    const appointmentId = url.searchParams.get('appointmentId')
+    url.searchParams.delete('payment')
+    url.searchParams.delete('appointmentId')
+    window.history.replaceState({}, '', url.toString())
+    if (!appointmentId) {
+      showError('We could not identify the appointment for this payment.')
+      return undefined
+    }
+
+    let active = true
+    api(`/appointments/${appointmentId}/payment`, { token })
+      .then(async (payment) => {
+        if (!active) return
+        if (payment.status === 'paid') {
+          showMessage(payment.confirmationEmailSent
+            ? 'Payment received. Your appointment confirmation email has been sent.'
+            : 'Payment received. Email delivery is pending; refresh your appointments shortly.')
+        }
+        else if (payment.status === 'failed') showError('Payment was not completed. You can try again from your appointments.')
+        else showMessage('Payment is still processing. Please refresh your appointments shortly.')
+        await loadAppointments(token)
+      })
+      .catch((requestError) => {
+        if (active) showError(requestError)
+      })
+    return () => { active = false }
+  }, [token, loadAppointments])
 
   function showError(text) {
     setToast({ type: 'error', text: friendlyErrorMessage(text) })
@@ -206,17 +303,43 @@ function App() {
   async function bookAppointment(event) {
     event.preventDefault()
     if (!selectedSlot) return showError('Choose an available appointment time.')
+    if (paymentConfig.provider === 'cashfree') {
+      const phoneDigits = String(profile.phone || '').replace(/\D/g, '')
+      const normalizedPhone = phoneDigits.length === 12 && phoneDigits.startsWith('91') ? phoneDigits.slice(2) : phoneDigits
+      if (!/^\d{10}$/.test(normalizedPhone)) {
+        setTab('appointments')
+        window.setTimeout(() => document.querySelector('.profile-form')?.scrollIntoView({ behavior: 'smooth' }), 0)
+        return showError('Add a valid 10-digit phone number to your profile before payment.')
+      }
+    }
     setLoading(true)
     try {
+      const cashfreeSdk = paymentConfig.provider === 'cashfree' ? await loadCashfreeSdk() : null
       const result = await api('/appointments', {
         token, method: 'POST',
         body: JSON.stringify({ serviceId: Number(serviceId), staffId: selectedSlot.staffId, date, startTime: selectedSlot.startTime }),
       })
-      showMessage(`Booking confirmed for ${date} at ${selectedSlot.startTime}.`)
       setSlots((current) => current.filter((slot) => slot.staffId !== selectedSlot.staffId || slot.startTime !== selectedSlot.startTime))
       setSelectedSlot(null)
-      await loadAppointments()
       setTab('appointments')
+      await loadAppointments()
+      if (paymentConfig.provider) {
+        showMessage('Your appointment is reserved. Complete secure payment to receive your confirmation email.')
+        try {
+          const payment = await startCheckout(result.id, cashfreeSdk)
+          if (payment?.status === 'paid') {
+            showMessage(payment.confirmationEmailSent
+              ? 'Payment received. Your appointment confirmation email has been sent.'
+              : 'Payment received. Email delivery is pending; refresh your appointments shortly.')
+          }
+          else if (payment?.status === 'failed') showError('Payment was not completed. Your appointment is reserved; you can retry from My appointments.')
+          else if (!payment?.redirected) showMessage('Payment is processing. We’ll email your appointment confirmation once it is verified.')
+        } catch (paymentError) {
+          showError(`Your appointment is reserved, but payment did not finish. You can retry from My appointments. ${friendlyErrorMessage(paymentError)}`)
+        }
+      } else {
+        showMessage(`Booking confirmed for ${date} at ${selectedSlot.startTime}.`)
+      }
       return result
     } catch (requestError) {
       showError(requestError.message)
@@ -339,11 +462,44 @@ function App() {
     } catch (requestError) { showError(requestError.message) }
   }
 
-  async function checkout(id) {
-    try {
-      const result = await api(`/appointments/${id}/checkout`, { token, method: 'POST' })
+  async function startCheckout(id, loadedCashfreeSdk) {
+    const result = await api(`/appointments/${id}/checkout`, { token, method: 'POST' })
+    if (result.provider !== 'cashfree') {
       window.location.assign(result.checkoutUrl)
+      return { redirected: true }
+    }
+
+    const Cashfree = loadedCashfreeSdk || await loadCashfreeSdk()
+    if (!Cashfree) throw new Error('Cashfree checkout could not be initialized. Please try again.')
+    const checkoutResult = await Cashfree({ mode: result.mode }).checkout({
+      paymentSessionId: result.paymentSessionId,
+      redirectTarget: '_modal',
+    })
+    if (checkoutResult?.error) throw new Error(checkoutResult.error.message || 'Cashfree payment was not completed.')
+
+    let payment
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      payment = await api(`/appointments/${id}/payment`, { token })
+      if (payment.status !== 'pending') break
+      if (attempt < 5) await new Promise((resolve) => window.setTimeout(resolve, 1500))
+    }
+    await loadAppointments()
+    return payment
+  }
+
+  async function checkout(id) {
+    setLoading(true)
+    try {
+      const payment = await startCheckout(id)
+      if (payment?.status === 'paid') {
+        showMessage(payment.confirmationEmailSent
+          ? 'Payment received. Your appointment confirmation email has been sent.'
+          : 'Payment received. Email delivery is pending; refresh your appointments shortly.')
+      }
+      else if (payment?.status === 'failed') showError('Payment was not completed. You can try again.')
+      else if (!payment?.redirected) showMessage('Payment is processing. We’ll email your confirmation once it is verified.')
     } catch (requestError) { showError(requestError.message) }
+    finally { setLoading(false) }
   }
 
   async function review(id) {
@@ -448,7 +604,7 @@ function App() {
                 <button key={service.id} className={`service-row d-flex align-items-center gap-3 ${String(service.id) === String(serviceId) ? 'selected' : ''}`} onClick={() => { setSelectedSlot(null); setSlots([]); setServiceId(String(service.id)) }}>
                   <span className="service-number flex-shrink-0">0{index + 1}</span>
                   <span className="service-main flex-grow-1 d-flex flex-column gap-2"><strong>{service.name}</strong><small>{service.description || `${service.duration_minutes} minutes of care`}</small></span>
-                  <span className="service-meta flex-shrink-0">{service.duration_minutes} min<br /><b>${Number(service.price).toFixed(2)}</b></span>
+                  <span className="service-meta flex-shrink-0">{service.duration_minutes} min<br /><b>{formatCurrency(service.price, paymentConfig.currency)}</b></span>
                   <span className="row-arrow flex-shrink-0" aria-hidden="true">↗︎</span>
                 </button>
               ))}
@@ -466,7 +622,7 @@ function App() {
                   <option value="">Anyone available</option>
                   {staff.filter((member) => !member.services?.length || member.services.some((service) => String(service.id) === String(serviceId))).map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}
                 </select>
-                <div className="slot-label"><label>Available times</label>{activeService && <span>{activeService.duration_minutes} min · ${Number(activeService.price).toFixed(2)}</span>}</div>
+                <div className="slot-label"><label>Available times</label>{activeService && <span>{activeService.duration_minutes} min · {formatCurrency(activeService.price, paymentConfig.currency)}</span>}</div>
                 <div className="slot-grid row row-cols-4 g-2">
                   {availabilityLoading ? <p className="empty-copy slots-empty">Finding available times…</p> : slots.length ? slots.map((slot) => {
                     const selected = selectedSlot?.staffId === slot.staffId && selectedSlot?.startTime === slot.startTime
@@ -476,14 +632,15 @@ function App() {
                 <button
                   className="btn btn-dark book-button"
                   type={user ? 'submit' : 'button'}
-                  disabled={loading || (Boolean(user) && (availabilityLoading || !selectedSlot))}
+                  disabled={loading || (Boolean(user) && (!paymentConfig.provider || availabilityLoading || !selectedSlot))}
                   onClick={() => {
                     if (!user) document.getElementById('account')?.scrollIntoView({ behavior: 'smooth' })
                   }}
                 >
-                  {loading ? 'Booking…' : !user ? 'Sign in to book' : 'Confirm appointment'} <span aria-hidden="true">↗︎</span>
+                  {loading ? 'Booking…' : !user ? 'Sign in to book' : !paymentConfig.provider ? 'Payment setup required' : 'Confirm & pay'} <span aria-hidden="true">↗︎</span>
                 </button>
                 {!user && <p className="form-hint">Your appointment is just a sign-in away.</p>}
+                {user && !paymentConfig.provider && <p className="form-hint">An online payment provider must be configured before booking.</p>}
               </form>
             </div>
           </div>
@@ -521,12 +678,13 @@ function App() {
             <div className="appointment-date col-auto"><span>{new Date(`${appointment.appointment_date}T12:00:00`).toLocaleDateString('en-US', { month: 'short' }).toUpperCase()}</span><strong>{new Date(`${appointment.appointment_date}T12:00:00`).getDate()}</strong></div>
             <div className="appointment-info col"><h3>{appointment.service_name}</h3><p>{appointment.staff_name} · {appointment.start_time.slice(0, 5)} · {appointment.duration_minutes} min</p></div>
             <span className={`status-pill col-auto ${appointment.status}`}>{appointment.status}</span>
+            {appointment.payment_status === 'paid' && <span className="status-pill col-auto paid">Paid</span>}
             <div className="appointment-actions col-auto d-flex flex-wrap gap-2">
-              {appointment.status === 'confirmed' && <button className="btn btn-sm btn-link" onClick={() => checkout(appointment.id)}>Pay online</button>}
+              {['pending_payment', 'confirmed'].includes(appointment.status) && appointment.payment_status !== 'paid' && <button className="btn btn-sm btn-link" disabled={loading} onClick={() => checkout(appointment.id)}>{loading ? 'Opening checkout…' : 'Pay online'}</button>}
               {appointment.status === 'confirmed' && <button className="btn btn-sm btn-link" onClick={() => rescheduleAppointment(appointment.id)}>Reschedule</button>}
-              {appointment.status === 'confirmed' && <button className="btn btn-sm btn-link text-secondary" onClick={() => cancelAppointment(appointment.id)}>Cancel</button>}
+              {['pending_payment', 'confirmed'].includes(appointment.status) && <button className="btn btn-sm btn-link text-secondary" onClick={() => cancelAppointment(appointment.id)}>Cancel</button>}
               {appointment.status === 'completed' && <button className="btn btn-sm btn-link" onClick={() => review(appointment.id)}>Leave a review</button>}
-              {appointment.status === 'completed' && <a className="btn btn-sm btn-link" href={`${API_URL}/appointments/${appointment.id}/invoice`} onClick={(event) => { event.preventDefault(); api(`/appointments/${appointment.id}/invoice`, { token }).then((invoice) => showMessage(`Invoice ${invoice.invoice_number} · $${Number(invoice.amount).toFixed(2)}`)).catch((requestError) => showError(requestError.message)) }}>Invoice</a>}
+              {appointment.status === 'completed' && <a className="btn btn-sm btn-link" href={`${API_URL}/appointments/${appointment.id}/invoice`} onClick={(event) => { event.preventDefault(); api(`/appointments/${appointment.id}/invoice`, { token }).then((invoice) => showMessage(`Invoice ${invoice.invoice_number} · ${formatCurrency(invoice.amount, paymentConfig.currency)}`)).catch((requestError) => showError(requestError.message)) }}>Invoice</a>}
             </div>
           </article>)}</div> : <div className="empty-panel"><span>✳︎</span><h3>Your next little ritual awaits.</h3><p>When you book a visit, you’ll find it here.</p><button className="btn btn-dark" onClick={() => changeTab('book')}>Explore services ↗︎</button></div>}
           <form className="profile-form card row row-cols-1 row-cols-lg-4 g-3 p-3 p-lg-4 mt-4" onSubmit={saveProfile}><div className="col"><p className="eyebrow">PROFILE DETAILS</p><h3>Your details</h3></div><div className="col"><input className="form-control" aria-label="Name" value={profile.name} onChange={(event) => setProfile({ ...profile, name: event.target.value })} /></div><div className="col"><input className="form-control" aria-label="Phone" value={profile.phone} placeholder="Phone" onChange={(event) => setProfile({ ...profile, phone: event.target.value })} /></div><div className="col"><button className="btn btn-outline-dark" type="submit">Save profile</button></div></form>
@@ -537,7 +695,7 @@ function App() {
           <div className="stat-grid row row-cols-2 row-cols-lg-4 g-0">{[['APPOINTMENTS', adminSummary?.appointments ?? appointments.length, `${adminSummary?.todayAppointments ?? 0} scheduled today`], ['OUR SERVICES', adminSummary?.services ?? services.length, 'services available to book'], ['OUR PEOPLE', adminSummary?.staff ?? staff.length, 'active stylists'], ['REVIEWS', adminSummary?.reviews ?? reviews.length, 'client experiences shared']].map(([label, count, caption]) => <div className="col" key={label}><div className="stat-card"><span>{label}</span><strong>{count}</strong><small>{caption}</small></div></div>)}</div>
           <div className="admin-columns row g-3">
             <div className="col-lg-6"><div className="admin-panel card h-100"><div className="panel-title"><div><p className="eyebrow">SERVICE MENU</p><h3>Add a service</h3></div></div><form className="stack-form" onSubmit={createService}><input className="form-control" required placeholder="Service name" value={serviceForm.name} onChange={(event) => setServiceForm({ ...serviceForm, name: event.target.value })} /><input className="form-control" placeholder="Description" value={serviceForm.description} onChange={(event) => setServiceForm({ ...serviceForm, description: event.target.value })} /><div className="form-row row g-2"><label className="col">Minutes<input className="form-control" required type="number" min="5" value={serviceForm.durationMinutes} onChange={(event) => setServiceForm({ ...serviceForm, durationMinutes: event.target.value })} /></label><label className="col">Price<input className="form-control" required type="number" min="0" step="0.01" value={serviceForm.price} onChange={(event) => setServiceForm({ ...serviceForm, price: event.target.value })} /></label></div><button className="btn btn-dark align-self-start">Add service +</button></form>
-              <div className="admin-service-list">{services.map((service) => <div key={service.id}><span>{service.name}</span><b>${Number(service.price).toFixed(2)}</b></div>)}</div>
+              <div className="admin-service-list">{services.map((service) => <div key={service.id}><span>{service.name}</span><b>{formatCurrency(service.price, paymentConfig.currency)}</b></div>)}</div>
             </div>
             </div>
             <div className="col-lg-6"><div className="admin-panel card h-100"><div className="panel-title"><div><p className="eyebrow">OUR PEOPLE</p><h3>Stylist profiles</h3></div></div><form className="stack-form" onSubmit={createStaff}><input className="form-control" required placeholder="Stylist name" value={staffForm.name} onChange={(event) => setStaffForm({ ...staffForm, name: event.target.value })} /><input className="form-control" placeholder="Short bio" value={staffForm.bio} onChange={(event) => setStaffForm({ ...staffForm, bio: event.target.value })} /><input className="form-control" placeholder="Specializations, comma separated" value={staffForm.specializations} onChange={(event) => setStaffForm({ ...staffForm, specializations: event.target.value })} /><button className="btn btn-dark align-self-start">Add stylist +</button></form>

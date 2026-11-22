@@ -12,7 +12,7 @@ Requirements: Node.js 20+, MySQL 8+, and npm.
    CREATE DATABASE salon_booking CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
    ```
 
-2. Copy `backend/.env.example` to `backend/.env`, set the database connection, and replace `JWT_SECRET` with a random value of at least 32 characters. To enable email confirmations and reminders, configure `SMTP_HOST`, port/security, and credentials. Set `SMTP_FROM` to a verified sender address; if it is blank, an email-formatted `SMTP_USER` is used as the sender. Restart the API after changing `.env`. To enable online checkout, set Stripe credentials and webhook secret. These integrations are optional for local booking.
+2. Copy `backend/.env.example` to `backend/.env`, set the database connection, and replace `JWT_SECRET` with a random value of at least 32 characters. To enable email confirmations and reminders, configure `SMTP_HOST`, port/security, and credentials. Set `SMTP_FROM` to a verified sender address; if it is blank, an email-formatted `SMTP_USER` is used as the sender. For Cashfree sandbox checkout, set `CASHFREE_CLIENT_ID` and `CASHFREE_CLIENT_SECRET` from the Cashfree sandbox portal; the checkout uses INR by default. Keep these credentials only in the backend `.env`, then restart the API after changing configuration. Stripe remains an optional fallback when Cashfree is not configured.
 3. Set up dependencies, create the initial admin, and optionally seed a demo catalog:
 
    ```powershell
@@ -79,14 +79,17 @@ Send `Authorization: Bearer <token>` on protected routes. Passwords are hashed, 
 | PATCH | `/appointments/:id/reschedule` | Owner or admin/staff | Reschedule using `date` and `startTime` |
 | PATCH | `/appointments/:id/cancel` | Owner or admin/staff | Cancel; customer policy defaults to 24h notice |
 | PATCH | `/appointments/:id/status` | Admin | Set `confirmed`, `cancelled`, or `completed` |
-| POST | `/appointments/:id/checkout` | Owner or admin/staff | Create a Stripe Checkout session; returns `checkoutUrl` |
-| POST | `/payments/webhook` | Stripe signature | Mark a payment paid after verified Checkout completion |
+| GET | `/payments/config` | Public | Return the active payment provider and currency |
+| POST | `/appointments/:id/checkout` | Owner or admin/staff | Create a Cashfree sandbox payment session (or Stripe Checkout fallback) |
+| GET | `/appointments/:id/payment` | Owner or admin/staff | Refresh and read the verified payment status |
+| POST | `/payments/cashfree/webhook` | Cashfree signature | Verify Cashfree webhook and synchronize the order status |
+| POST | `/payments/webhook` | Stripe signature | Mark a Stripe payment paid after verified Checkout completion |
 | GET | `/appointments/:id/invoice` | Owner or admin/staff | Generate/read invoice for a completed appointment |
 | POST | `/appointments/:id/reviews` | Appointment owner | Review a completed appointment (`rating` 1–5, optional `comment`) |
 | GET | `/reviews?staffId=1` | Public | List reviews, optionally filtered by staff |
 | PATCH | `/reviews/:id/response` | Admin or linked staff | Add a staff response (`response`) |
 
-Bookings are checked against staff skills, working hours, and overlapping reservations in a transaction. The confirmation email is sent after booking when SMTP is configured. A 15-minute cron job checks for appointments in the next 24 hours and sends one reminder. SMTP failures are logged and do not roll back a booking.
+Bookings are checked against staff skills, working hours, and overlapping reservations in a transaction. A slot is held as `pending_payment` while checkout is open. Confirmed status and the confirmation email are created only after the backend verifies successful Cashfree or Stripe payment. Customers can retry payment from My appointments if checkout is closed or interrupted. Booking is unavailable until an online payment provider is configured. A 15-minute cron job checks for appointments in the next 24 hours and sends one reminder. SMTP failures are logged and do not roll back a booking.
 
 ### Admin
 
@@ -101,6 +104,7 @@ Responses are JSON. Error responses use `{ "error": "..." }`; common status code
 ## Notes
 
 - The salon schedule and appointment timestamps use `SALON_TIMEZONE`; configure the MySQL server timezone consistently. The default is UTC.
-- Stripe Checkout requires a valid Stripe webhook endpoint at `/api/payments/webhook`; set `STRIPE_WEBHOOK_SECRET` from Stripe CLI/dashboard.
+- Cashfree sandbox uses `https://sandbox.cashfree.com/pg` and the Cashfree JavaScript checkout SDK. Cashfree credentials stay on the backend. The browser return checks order status server-to-server; for webhook delivery, configure `CASHFREE_NOTIFY_URL` to the public `/api/payments/cashfree/webhook` endpoint. Stripe Checkout remains available as a fallback and requires `STRIPE_WEBHOOK_SECRET`.
+- Cashfree checkout requires a valid 10-digit phone number on the customer profile. Service price values are interpreted as INR for Cashfree; no currency conversion is applied to existing prices.
 - SMS delivery is not enabled; configure an SMS provider separately if required.
 - Do not use demo credentials or secrets in production. Deploy behind HTTPS and configure database backups and operational monitoring.

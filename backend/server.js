@@ -12,6 +12,7 @@ const PORT = Number(process.env.PORT || 4000);
 
 app.use(cors({ origin: process.env.FRONTEND_ORIGIN || 'http://localhost:5173' }));
 app.use('/api/payments/webhook', express.raw({ type: 'application/json' }));
+app.use('/api/payments/cashfree/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '1mb' }));
 app.use((req, _res, next) => {
   req.body = req.body || {};

@@ -1,5 +1,6 @@
 const express = require('express');
 const { Op } = require('sequelize');
+const { createHmac, randomUUID, timingSafeEqual } = require('node:crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
@@ -34,6 +35,24 @@ if (mailTransport && !process.env.SMTP_FROM) {
   console.warn('SMTP_FROM is unset; using the email SMTP_USER as the sender. Configure a verified SMTP_FROM address if delivery is rejected.');
 }
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+const cashfreeClientId = process.env.CASHFREE_CLIENT_ID;
+const cashfreeClientSecret = process.env.CASHFREE_CLIENT_SECRET;
+const cashfreeConfigured = Boolean(cashfreeClientId && cashfreeClientSecret);
+const cashfreeCurrency = (process.env.CASHFREE_CURRENCY || 'INR').toUpperCase();
+if (!/^[A-Z]{3}$/.test(cashfreeCurrency)) {
+  throw new Error('CASHFREE_CURRENCY must be a three-letter currency code.');
+}
+if (Boolean(cashfreeClientId) !== Boolean(cashfreeClientSecret)) {
+  console.warn('Cashfree sandbox credentials are incomplete; checkout will use Stripe if configured.');
+}
+const cashfreeApiUrl = 'https://sandbox.cashfree.com/pg';
+const paymentProvider = cashfreeConfigured ? 'cashfree' : stripe ? 'stripe' : null;
+const paymentCurrency = paymentProvider === 'stripe'
+  ? (process.env.STRIPE_CURRENCY || 'usd').toUpperCase()
+  : cashfreeCurrency;
+if (!paymentProvider) {
+  console.warn('Online payments are disabled. Configure Cashfree sandbox credentials to enable checkout.');
+}
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,
@@ -100,6 +119,7 @@ const appointmentIncludes = [
   { model: User, as: 'customer', attributes: ['name', 'email'] },
   { model: Staff, as: 'staff', attributes: ['name'] },
   { model: Service, as: 'service', attributes: ['name', 'duration_minutes', 'price'] },
+  { model: Payment, as: 'payment', attributes: ['provider', 'status'] },
 ];
 const serializeAppointment = (record) => {
   const appointment = asPlain(record);
@@ -119,6 +139,8 @@ const serializeAppointment = (record) => {
     start_time: appointment.start_time,
     end_time: appointment.end_time,
     status: appointment.status,
+    payment_status: appointment.payment?.status || null,
+    payment_provider: appointment.payment?.provider || null,
     notes: appointment.notes,
     created_at: appointment.created_at,
   };
@@ -137,6 +159,97 @@ async function sendEmail({ to, subject, text }) {
   return true;
 }
 
+async function sendPaymentConfirmation(paymentId) {
+  await sequelize.transaction(async (transaction) => {
+    const payment = await Payment.findByPk(paymentId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!payment || payment.status !== 'paid' || payment.confirmation_email_sent_at) return;
+
+    const appointment = await findAppointment(payment.appointment_id, { transaction });
+    if (!appointment) return;
+    const data = serializeAppointment(appointment);
+    await Appointment.update(
+      { status: 'confirmed' },
+      { where: { id: payment.appointment_id, status: 'pending_payment' }, transaction },
+    );
+    const sent = await sendEmail({
+      to: data.customer_email,
+      subject: 'Payment received — your salon appointment is confirmed',
+      text: `Hi ${data.customer_name}, we received your payment for ${data.service_name}. Your appointment with ${data.staff_name} is confirmed for ${data.appointment_date} at ${data.start_time}.`,
+    });
+    if (sent) await payment.update({ confirmation_email_sent_at: new Date() }, { transaction });
+  });
+}
+
+async function cashfreeRequest(path, { method = 'GET', body } = {}) {
+  let response;
+  try {
+    response = await fetch(`${cashfreeApiUrl}${path}`, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-version': '2023-08-01',
+        'x-client-id': cashfreeClientId,
+        'x-client-secret': cashfreeClientSecret,
+        ...(method === 'POST' ? { 'x-idempotency-key': randomUUID() } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  } catch (error) {
+    console.error('Cashfree sandbox request failed to connect:', error.message);
+    throw fail(502, 'Could not connect to Cashfree sandbox. Please try again.');
+  }
+  if (!response.ok) {
+    console.error(`Cashfree sandbox request failed with status ${response.status}.`);
+    throw fail(502, 'Cashfree sandbox could not process the payment request. Check the sandbox credentials and try again.');
+  }
+  try {
+    return await response.json();
+  } catch {
+    throw fail(502, 'Cashfree sandbox returned an invalid response.');
+  }
+}
+
+function verifyCashfreeWebhook(rawBody, timestamp, signature) {
+  if (!Buffer.isBuffer(rawBody) || !timestamp || !signature || !cashfreeClientSecret) return false;
+  const expected = createHmac('sha256', cashfreeClientSecret)
+    .update(timestamp + rawBody.toString('utf8'))
+    .digest();
+  const received = Buffer.from(signature, 'base64');
+  return received.length === expected.length && timingSafeEqual(received, expected);
+}
+
+async function syncCashfreePayment(orderId) {
+  const payment = await Payment.findOne({
+    where: { provider: 'cashfree', provider_session_id: orderId },
+  });
+  if (!payment) return null;
+
+  if (payment.status === 'pending') {
+    const order = await cashfreeRequest(`/orders/${encodeURIComponent(orderId)}`);
+    const amountMatches = Math.round(Number(order.order_amount) * 100) === Math.round(Number(payment.amount) * 100);
+    const currencyMatches = String(order.order_currency).toUpperCase() === cashfreeCurrency;
+    if (!amountMatches || !currencyMatches) {
+      console.error('Cashfree order verification failed: amount or currency mismatch.');
+      throw fail(502, 'Cashfree payment details could not be verified. Contact the salon before retrying.');
+    }
+
+    if (order.order_status === 'PAID') await payment.update({ status: 'paid' });
+    else if (['EXPIRED', 'TERMINATED'].includes(order.order_status)) await payment.update({ status: 'failed' });
+  }
+
+  if (payment.status === 'paid') {
+    try {
+      await sendPaymentConfirmation(payment.id);
+    } catch (error) {
+      console.error('Payment confirmation email failed:', error.message);
+    }
+  }
+  return payment;
+}
+
 async function notifyBooking(appointmentId, kind = 'confirmed') {
   const appointment = await findAppointment(appointmentId);
   if (!appointment) return;
@@ -149,6 +262,9 @@ async function notifyBooking(appointmentId, kind = 'confirmed') {
 }
 
 router.get('/health', (_req, res) => res.json({ status: 'ok' }));
+router.get('/payments/config', (_req, res) => {
+  res.json({ provider: paymentProvider, currency: paymentCurrency });
+});
 
 router.post('/auth/register', authLimiter, asyncRoute(async (req, res) => {
   const { name, email, password, phone } = req.body;
@@ -381,7 +497,7 @@ router.get('/availability', asyncRoute(async (req, res) => {
     order: [['name', 'ASC']],
   });
   const booked = await Appointment.findAll({
-    where: { appointment_date: date, status: 'confirmed' },
+    where: { appointment_date: date, status: { [Op.in]: ['pending_payment', 'confirmed'] } },
     attributes: ['staff_id', 'start_time', 'end_time'],
   });
   const slots = [];
@@ -407,6 +523,9 @@ router.get('/availability', asyncRoute(async (req, res) => {
 }));
 
 router.post('/appointments', authenticate, asyncRoute(async (req, res) => {
+  if (!paymentProvider) {
+    throw fail(503, 'Online payment is required. Configure Cashfree or Stripe before confirming a booking.');
+  }
   const serviceId = parseId(req.body.serviceId);
   const staffId = parseId(req.body.staffId);
   const date = String(req.body.date || '');
@@ -436,7 +555,8 @@ router.post('/appointments', authenticate, asyncRoute(async (req, res) => {
     if (!hours) throw fail(409, "The selected time is outside this staff member's working hours.");
     const conflict = await Appointment.findOne({
       where: {
-        staff_id: staffId, appointment_date: date, status: 'confirmed',
+        staff_id: staffId, appointment_date: date,
+        status: { [Op.in]: ['pending_payment', 'confirmed'] },
         start_time: { [Op.lt]: asTime(end) },
         end_time: { [Op.gt]: asTime(start) },
       },
@@ -448,9 +568,9 @@ router.post('/appointments', authenticate, asyncRoute(async (req, res) => {
       customer_id: req.user.id, staff_id: staffId, service_id: serviceId,
       appointment_date: date, start_time: asTime(start), end_time: asTime(end),
       notes: req.body.notes?.trim() || null,
+      status: 'pending_payment',
     }, { transaction });
   });
-  await notifyBooking(appointment.id).catch((error) => console.error('Appointment confirmation email failed:', error.message));
   res.status(201).json(serializeAppointment(await findAppointment(appointment.id)));
 }));
 
@@ -458,7 +578,7 @@ router.get('/appointments', authenticate, asyncRoute(async (req, res) => {
   const where = {};
   if (req.user.role === 'customer') where.customer_id = req.user.id;
   if (req.query.status) {
-    if (!['confirmed', 'cancelled', 'completed'].includes(req.query.status)) throw fail(400, 'Unknown appointment status.');
+    if (!['pending_payment', 'confirmed', 'cancelled', 'completed'].includes(req.query.status)) throw fail(400, 'Unknown appointment status.');
     where.status = req.query.status;
   }
   const appointments = await Appointment.findAll({
@@ -512,7 +632,8 @@ router.patch('/appointments/:id/reschedule', authenticate, asyncRoute(async (req
     if (!hours) throw fail(409, "The selected time is outside this staff member's working hours.");
     const conflict = await Appointment.findOne({
       where: {
-        id: { [Op.ne]: id }, staff_id: existing.staff_id, appointment_date: date, status: 'confirmed',
+        id: { [Op.ne]: id }, staff_id: existing.staff_id, appointment_date: date,
+        status: { [Op.in]: ['pending_payment', 'confirmed'] },
         start_time: { [Op.lt]: asTime(start + duration) },
         end_time: { [Op.gt]: asTime(start) },
       },
@@ -531,7 +652,7 @@ router.patch('/appointments/:id/cancel', authenticate, asyncRoute(async (req, re
   const appointment = await Appointment.findByPk(id);
   if (!appointment) throw fail(404, 'Appointment not found.');
   if (req.user.role === 'customer' && String(appointment.customer_id) !== String(req.user.id)) throw fail(403, 'You cannot cancel this appointment.');
-  if (appointment.status !== 'confirmed') throw fail(409, 'Only confirmed appointments can be cancelled.');
+  if (!['pending_payment', 'confirmed'].includes(appointment.status)) throw fail(409, 'Only pending or confirmed appointments can be cancelled.');
   const cutoff = Number(process.env.CANCELLATION_CUTOFF_HOURS || 24);
   if (req.user.role === 'customer' && new Date(`${appointment.appointment_date}T${appointment.start_time}`) - Date.now() < cutoff * 3600000) {
     throw fail(409, `Appointments can only be cancelled at least ${cutoff} hours in advance.`);
@@ -544,7 +665,7 @@ router.patch('/appointments/:id/cancel', authenticate, asyncRoute(async (req, re
 router.patch('/appointments/:id/status', authenticate, allowRoles('admin'), asyncRoute(async (req, res) => {
   const id = parseId(req.params.id);
   const { status } = req.body;
-  if (!['confirmed', 'cancelled', 'completed'].includes(status)) throw fail(400, 'Status must be confirmed, cancelled, or completed.');
+  if (!['pending_payment', 'confirmed', 'cancelled', 'completed'].includes(status)) throw fail(400, 'Status must be pending_payment, confirmed, cancelled, or completed.');
   const appointment = await Appointment.findByPk(id);
   if (!appointment) throw fail(404, 'Appointment not found.');
   await appointment.update({ status });
@@ -569,20 +690,74 @@ router.get('/appointments/:id/invoice', authenticate, asyncRoute(async (req, res
 }));
 
 router.post('/appointments/:id/checkout', authenticate, asyncRoute(async (req, res) => {
-  if (!stripe) throw fail(503, 'Online payments are not configured. Set STRIPE_SECRET_KEY to enable checkout.');
+  if (!cashfreeConfigured && !stripe) {
+    throw fail(503, 'Online payments are not configured. Set Cashfree sandbox credentials to enable checkout.');
+  }
   const id = parseId(req.params.id);
   const appointment = await findAppointment(id);
   if (!appointment) throw fail(404, 'Appointment not found.');
   const data = serializeAppointment(appointment);
   if (req.user.role === 'customer' && String(data.customer_id) !== String(req.user.id)) throw fail(403, 'You cannot pay for this appointment.');
-  if (data.status !== 'confirmed') throw fail(409, 'Only confirmed appointments can be paid.');
+  if (!['pending_payment', 'confirmed'].includes(data.status)) throw fail(409, 'Only pending or confirmed appointments can be paid.');
+  const existingPayment = await Payment.findOne({ where: { appointment_id: id } });
+  if (existingPayment?.status === 'paid') throw fail(409, 'This appointment has already been paid.');
+  if (cashfreeConfigured) {
+    const amount = Number(data.price);
+    if (!Number.isFinite(amount) || amount <= 0) throw fail(409, 'This appointment does not have a payable amount.');
+    const customer = await User.findByPk(data.customer_id, { attributes: ['phone'] });
+    const phoneDigits = String(customer?.phone || '').replace(/\D/g, '');
+    const customerPhone = phoneDigits.length === 12 && phoneDigits.startsWith('91') ? phoneDigits.slice(2) : phoneDigits;
+    if (!/^\d{10}$/.test(customerPhone)) {
+      throw fail(400, 'Add a valid 10-digit phone number to your profile before paying with Cashfree.');
+    }
+
+    const returnUrl = new URL(process.env.CASHFREE_RETURN_URL || process.env.FRONTEND_ORIGIN || 'http://localhost:5173');
+    returnUrl.searchParams.set('payment', 'cashfree_return');
+    returnUrl.searchParams.set('appointmentId', String(id));
+    const orderId = `salon-${id}-${Date.now()}`;
+    const order = await cashfreeRequest('/orders', {
+      method: 'POST',
+      body: {
+        order_id: orderId,
+        order_amount: amount,
+        order_currency: cashfreeCurrency,
+        customer_details: {
+          customer_id: `salon-${data.customer_id}`,
+          customer_name: String(data.customer_name || 'Salon customer').slice(0, 100),
+          customer_email: data.customer_email,
+          customer_phone: customerPhone,
+        },
+        order_meta: {
+          return_url: returnUrl.toString(),
+          ...(process.env.CASHFREE_NOTIFY_URL ? { notify_url: process.env.CASHFREE_NOTIFY_URL } : {}),
+        },
+        order_note: `Salon appointment ${id}`,
+      },
+    });
+    if (!order.order_id || !order.payment_session_id) {
+      throw fail(502, 'Cashfree sandbox did not return a valid payment session.');
+    }
+    const [payment, created] = await Payment.findOrCreate({
+      where: { appointment_id: id },
+      defaults: { provider: 'cashfree', provider_session_id: order.order_id, amount, status: 'pending' },
+    });
+    if (!created) await payment.update({ provider: 'cashfree', provider_session_id: order.order_id, amount, status: 'pending' });
+    res.status(201).json({
+      provider: 'cashfree',
+      paymentSessionId: order.payment_session_id,
+      mode: 'sandbox',
+      currency: cashfreeCurrency,
+    });
+    return;
+  }
+
   const session = await stripe.checkout.sessions.create({
     mode: 'payment',
     customer_email: data.customer_email,
     line_items: [{
       quantity: 1,
       price_data: {
-        currency: process.env.STRIPE_CURRENCY || 'usd',
+        currency: (process.env.STRIPE_CURRENCY || 'usd').toLowerCase(),
         unit_amount: Math.round(Number(data.price) * 100),
         product_data: { name: data.service_name },
       },
@@ -596,7 +771,28 @@ router.post('/appointments/:id/checkout', authenticate, asyncRoute(async (req, r
     defaults: { provider: 'stripe', provider_session_id: session.id, amount: data.price, status: 'pending' },
   });
   if (!created) await payment.update({ provider: 'stripe', provider_session_id: session.id, amount: data.price, status: 'pending' });
-  res.status(201).json({ checkoutUrl: session.url });
+  res.status(201).json({ provider: 'stripe', checkoutUrl: session.url });
+}));
+
+router.get('/appointments/:id/payment', authenticate, asyncRoute(async (req, res) => {
+  const id = parseId(req.params.id);
+  const appointment = await findAppointment(id);
+  if (!appointment) throw fail(404, 'Appointment not found.');
+  const data = serializeAppointment(appointment);
+  if (req.user.role === 'customer' && String(data.customer_id) !== String(req.user.id)) throw fail(403, 'You cannot access this payment.');
+  const payment = await Payment.findOne({ where: { appointment_id: id } });
+  if (!payment) throw fail(404, 'No payment has been started for this appointment.');
+  const currentPayment = payment.provider === 'cashfree'
+    ? await syncCashfreePayment(payment.provider_session_id)
+    : payment;
+  const refreshedPayment = await Payment.findByPk(currentPayment.id);
+  res.json({
+    provider: refreshedPayment.provider,
+    status: refreshedPayment.status,
+    amount: refreshedPayment.amount,
+    currency: refreshedPayment.provider === 'cashfree' ? cashfreeCurrency : (process.env.STRIPE_CURRENCY || 'usd').toUpperCase(),
+    confirmationEmailSent: Boolean(refreshedPayment.confirmation_email_sent_at),
+  });
 }));
 
 router.post('/payments/webhook', asyncRoute(async (req, res) => {
@@ -608,8 +804,35 @@ router.post('/payments/webhook', asyncRoute(async (req, res) => {
     throw fail(400, `Invalid Stripe webhook signature: ${error.message}`);
   }
   if (event.type === 'checkout.session.completed') {
-    await Payment.update({ status: 'paid' }, { where: { provider_session_id: event.data.object.id } });
+    const payment = await Payment.findOne({
+      where: { provider: 'stripe', provider_session_id: event.data.object.id },
+    });
+    if (payment) {
+      await payment.update({ status: 'paid' });
+      await Appointment.update(
+        { status: 'confirmed' },
+        { where: { id: payment.appointment_id, status: 'pending_payment' } },
+      );
+      await sendPaymentConfirmation(payment.id);
+    }
   }
+  res.json({ received: true });
+}));
+
+router.post('/payments/cashfree/webhook', asyncRoute(async (req, res) => {
+  if (!cashfreeConfigured) throw fail(503, 'Cashfree sandbox webhooks are not configured.');
+  if (!verifyCashfreeWebhook(req.body, req.headers['x-webhook-timestamp'], req.headers['x-webhook-signature'])) {
+    throw fail(400, 'Invalid Cashfree webhook signature.');
+  }
+  let event;
+  try {
+    event = JSON.parse(req.body.toString('utf8'));
+  } catch {
+    throw fail(400, 'Invalid Cashfree webhook payload.');
+  }
+  const orderId = event?.data?.order?.order_id;
+  if (typeof orderId !== 'string' || !orderId) throw fail(400, 'Cashfree webhook is missing its order ID.');
+  await syncCashfreePayment(orderId);
   res.json({ received: true });
 }));
 
@@ -752,4 +975,4 @@ function startReminderJob(cron) {
   }, { timezone: process.env.SALON_TIMEZONE || 'UTC' });
 }
 
-module.exports = { router, startReminderJob };
+module.exports = { router, startReminderJob, verifyCashfreeWebhook };

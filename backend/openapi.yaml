@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Salon Appointment Booking API
   version: 1.0.0
-  description: Express and Sequelize salon scheduling API backed by MySQL. Protected endpoints require a bearer JWT. Role restrictions are documented per operation. Email confirmations and reminders require SMTP settings; online checkout requires Stripe keys.
+  description: Express and Sequelize salon scheduling API backed by MySQL. Protected endpoints require a bearer JWT. Role restrictions are documented per operation. Email confirmations and reminders require SMTP settings; Cashfree sandbox checkout uses backend credentials and INR by default, with Stripe as an optional fallback.
 servers:
   - url: http://localhost:4000/api
 security:
@@ -298,17 +298,60 @@ paths:
               type: object
               required: [status]
               properties:
-                status: { type: string, enum: [confirmed, cancelled, completed] }
+                status: { type: string, enum: [pending_payment, confirmed, cancelled, completed] }
       responses:
         '200': { description: Status updated }
+  /payments/config:
+    get:
+      security: []
+      summary: Read the active payment provider and currency
+      responses:
+        '200': { description: Provider and currency configuration without secrets }
   /appointments/{id}/checkout:
     post:
-      summary: Create a Stripe Checkout session
+      summary: Create a Cashfree sandbox session or Stripe fallback checkout
       parameters:
         - $ref: '#/components/parameters/id'
       responses:
-        '201': { description: Checkout URL }
-        '503': { description: Stripe is not configured }
+        '201':
+          description: Cashfree session ID or Stripe checkout URL
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [provider, paymentSessionId, mode, currency]
+                    properties:
+                      provider: { type: string, enum: [cashfree] }
+                      paymentSessionId: { type: string }
+                      mode: { type: string, enum: [sandbox] }
+                      currency: { type: string, example: INR }
+                  - type: object
+                    required: [provider, checkoutUrl]
+                    properties:
+                      provider: { type: string, enum: [stripe] }
+                      checkoutUrl: { type: string, format: uri }
+        '400': { description: Cashfree profile requirements are not met }
+        '503': { description: No payment provider is configured }
+  /appointments/{id}/payment:
+    get:
+      summary: Read payment status and whether the confirmation email was sent
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Current payment and confirmation email status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  provider: { type: string, enum: [cashfree, stripe] }
+                  status: { type: string, enum: [pending, paid, failed] }
+                  amount: { type: number }
+                  currency: { type: string }
+                  confirmationEmailSent: { type: boolean }
+        '404': { description: Appointment or payment not found }
   /appointments/{id}/invoice:
     get:
       summary: Get or create invoice for a completed appointment
@@ -408,6 +451,22 @@ paths:
       summary: Receive verified Stripe Checkout events
       responses:
         '200': { description: Webhook accepted }
+  /payments/cashfree/webhook:
+    post:
+      security: []
+      summary: Receive and verify Cashfree sandbox order events
+      parameters:
+        - name: x-webhook-timestamp
+          in: header
+          required: true
+          schema: { type: string }
+        - name: x-webhook-signature
+          in: header
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Webhook accepted }
+        '400': { description: Invalid signature or payload }
         '400': { description: Signature invalid }
 components:
   securitySchemes:

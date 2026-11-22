@@ -1,6 +1,7 @@
 {
   "scripts": {
     "start": "node server.js",
+    "test": "node --test",
     "seed:admin": "node seed-admin.js",
     "seed:demo": "node seed-demo.js"
   },

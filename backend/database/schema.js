@@ -75,7 +75,7 @@ const Appointment = sequelize.define('Appointment', {
   appointment_date: { type: DataTypes.DATEONLY, allowNull: false },
   start_time: { type: DataTypes.TIME, allowNull: false },
   end_time: { type: DataTypes.TIME, allowNull: false },
-  status: { type: DataTypes.ENUM('confirmed', 'cancelled', 'completed'), allowNull: false, defaultValue: 'confirmed' },
+  status: { type: DataTypes.ENUM('pending_payment', 'confirmed', 'cancelled', 'completed'), allowNull: false, defaultValue: 'pending_payment' },
   notes: { type: DataTypes.TEXT, allowNull: true },
   reminder_sent_at: { type: DataTypes.DATE, allowNull: true },
   created_at: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
@@ -93,6 +93,7 @@ const Payment = sequelize.define('Payment', {
   provider_session_id: { type: DataTypes.STRING(255), allowNull: true },
   amount: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
   status: { type: DataTypes.ENUM('pending', 'paid', 'failed'), allowNull: false, defaultValue: 'pending' },
+  confirmation_email_sent_at: { type: DataTypes.DATE, allowNull: true },
   created_at: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
 }, modelOptions('payments'));
 
@@ -144,6 +145,21 @@ async function initializeSchema() {
   }
   await sequelize.authenticate();
   await sequelize.sync();
+  const appointmentColumns = await sequelize.getQueryInterface().describeTable('appointments');
+  if (appointmentColumns.status?.type) {
+    await sequelize.getQueryInterface().changeColumn('appointments', 'status', {
+      type: DataTypes.ENUM('pending_payment', 'confirmed', 'cancelled', 'completed'),
+      allowNull: false,
+      defaultValue: 'pending_payment',
+    });
+  }
+  const paymentColumns = await sequelize.getQueryInterface().describeTable('payments');
+  if (!paymentColumns.confirmation_email_sent_at) {
+    await sequelize.getQueryInterface().addColumn('payments', 'confirmation_email_sent_at', {
+      type: DataTypes.DATE,
+      allowNull: true,
+    });
+  }
 }
 
 module.exports = {
