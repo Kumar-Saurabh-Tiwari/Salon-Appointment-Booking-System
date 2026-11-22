@@ -19,7 +19,10 @@ const {
 } = require('../database/schema');
 
 const router = express.Router();
-const mailTransport = process.env.SMTP_HOST && process.env.SMTP_FROM
+const smtpFrom = process.env.SMTP_FROM || (
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(process.env.SMTP_USER || '') ? process.env.SMTP_USER : ''
+);
+const mailTransport = process.env.SMTP_HOST && smtpFrom
   ? nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT || 587),
@@ -27,6 +30,9 @@ const mailTransport = process.env.SMTP_HOST && process.env.SMTP_FROM
       auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD } : undefined,
     })
   : null;
+if (mailTransport && !process.env.SMTP_FROM) {
+  console.warn('SMTP_FROM is unset; using the email SMTP_USER as the sender. Configure a verified SMTP_FROM address if delivery is rejected.');
+}
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -127,7 +133,7 @@ async function sendEmail({ to, subject, text }) {
     console.warn(`Email not sent (SMTP is not configured): ${subject} -> ${to}`);
     return false;
   }
-  await mailTransport.sendMail({ from: process.env.SMTP_FROM, to, subject, text });
+  await mailTransport.sendMail({ from: smtpFrom, to, subject, text });
   return true;
 }
 
@@ -713,8 +719,8 @@ router.use((error, _req, res, _next) => {
 });
 
 function startReminderJob(cron) {
-  if (!process.env.SMTP_HOST || !process.env.SMTP_FROM) {
-    console.warn('Appointment reminders are disabled because SMTP is not configured.');
+  if (!mailTransport) {
+    console.warn('Appointment reminders are disabled. Configure SMTP_HOST and SMTP_FROM, or set SMTP_USER to an email address.');
     return;
   }
   cron.schedule('*/15 * * * *', async () => {

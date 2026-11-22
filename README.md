@@ -12,7 +12,7 @@ Requirements: Node.js 20+, MySQL 8+, and npm.
    CREATE DATABASE salon_booking CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
    ```
 
-2. Copy `backend/.env.example` to `backend/.env`, set the database connection, and replace `JWT_SECRET` with a random value of at least 32 characters. To enable email confirmations and reminders, configure SMTP. To enable online checkout, set Stripe credentials and webhook secret. These integrations are optional for local booking.
+2. Copy `backend/.env.example` to `backend/.env`, set the database connection, and replace `JWT_SECRET` with a random value of at least 32 characters. To enable email confirmations and reminders, configure `SMTP_HOST`, port/security, and credentials. Set `SMTP_FROM` to a verified sender address; if it is blank, an email-formatted `SMTP_USER` is used as the sender. Restart the API after changing `.env`. To enable online checkout, set Stripe credentials and webhook secret. These integrations are optional for local booking.
 3. Set up dependencies, create the initial admin, and optionally seed a demo catalog:
 
    ```powershell
