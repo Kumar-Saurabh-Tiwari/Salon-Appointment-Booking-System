@@ -1,6 +1,6 @@
 # Salon appointment booking
 
-An Express + MySQL booking API with a small React + Bootstrap 5 client for browsing services, booking appointments, and managing salon data.
+An Express + Sequelize + MySQL booking API with a React + Bootstrap 5 client for browsing services, booking appointments, and managing salon data.
 
 ## Run locally
 
@@ -13,12 +13,13 @@ Requirements: Node.js 20+, MySQL 8+, and npm.
    ```
 
 2. Copy `backend/.env.example` to `backend/.env`, set the database connection, and replace `JWT_SECRET` with a random value of at least 32 characters. To enable email confirmations and reminders, configure SMTP. To enable online checkout, set Stripe credentials and webhook secret. These integrations are optional for local booking.
-3. Set up dependencies and create the initial admin:
+3. Set up dependencies, create the initial admin, and optionally seed a demo catalog:
 
    ```powershell
    cd backend
    npm install
    npm run seed:admin
+   npm run seed:demo
    npm start
    ```
 
@@ -33,13 +34,13 @@ Requirements: Node.js 20+, MySQL 8+, and npm.
 
    Open the Vite URL (normally `http://localhost:5173`). The frontend calls `http://localhost:4000` by default; set `VITE_API_URL` before starting Vite to use another API URL.
 
-The API creates the required tables on startup. Add services and staff in the admin view, assign services to staff, and set each staff member's weekly working hours before making customer bookings.
+The API defines its Sequelize models and associations in `backend/database/schema.js` and synchronizes missing tables on startup without altering existing columns. Add services and staff in the admin view, assign services to staff, and set each staff member's weekly working hours before making customer bookings.
 
 To populate an empty local database with example treatments, a sample stylist, and weekly availability, run `npm run seed:demo` from `backend`. The command only adds demo data when both the services and staff tables are empty; it will not overwrite an existing catalog.
 
 ## API
 
-All routes are prefixed with `/api`. The interactive frontend is a demo client; the API contract is also available as [OpenAPI](./backend/openapi.yaml).
+All routes are prefixed with `/api`. The interactive frontend is a demo client; the full API contract is available as [OpenAPI](./backend/openapi.yaml).
 
 ### Authentication and profiles
 
@@ -93,6 +94,7 @@ Bookings are checked against staff skills, working hours, and overlapping reserv
 |---|---|---|---|
 | GET | `/admin/users` | Admin | List users |
 | PATCH | `/admin/users/:id` | Admin | Update a user's `name` or `role` |
+| GET | `/admin/dashboard` | Admin | Return entity totals, today's bookings, and the next 10 upcoming appointments |
 
 Responses are JSON. Error responses use `{ "error": "..." }`; common status codes are 400 (invalid input), 401 (missing/invalid token), 403 (not allowed), 404 (not found), 409 (booking conflict/policy), 429 (auth rate limit), and 503 (optional integration not configured).
 

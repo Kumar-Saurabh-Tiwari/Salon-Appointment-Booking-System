@@ -56,6 +56,7 @@ function App() {
   const [slots, setSlots] = useState([])
   const [appointments, setAppointments] = useState([])
   const [users, setUsers] = useState([])
+  const [adminSummary, setAdminSummary] = useState(null)
   const [reviews, setReviews] = useState([])
   const [serviceId, setServiceId] = useState('')
   const [staffId, setStaffId] = useState('')
@@ -254,7 +255,7 @@ function App() {
     try {
       await api(`/appointments/${id}/status`, { token, method: 'PATCH', body: JSON.stringify({ status: 'completed' }) })
       showMessage('Appointment marked as completed.')
-      await loadAppointments()
+      await Promise.all([loadAppointments(), loadAdminSummary()])
     } catch (requestError) {
       showError(requestError.message)
     }
@@ -277,7 +278,7 @@ function App() {
     try {
       await api('/services', { token, method: 'POST', body: JSON.stringify({ ...serviceForm, durationMinutes: Number(serviceForm.durationMinutes), price: Number(serviceForm.price) }) })
       setServiceForm({ name: '', description: '', durationMinutes: 45, price: '' })
-      await loadCatalog()
+      await Promise.all([loadCatalog(), loadAdminSummary()])
       showMessage('Service added.')
     } catch (requestError) {
       showError(requestError.message)
@@ -292,7 +293,7 @@ function App() {
         body: JSON.stringify({ ...staffForm, specializations: staffForm.specializations.split(',').map((item) => item.trim()).filter(Boolean) }),
       })
       setStaffForm({ name: '', bio: '', specializations: '' })
-      await loadCatalog()
+      await Promise.all([loadCatalog(), loadAdminSummary()])
       showMessage('Staff profile added.')
     } catch (requestError) {
       showError(requestError.message)
@@ -326,10 +327,14 @@ function App() {
     try { setUsers(await api('/admin/users', { token })) } catch (requestError) { showError(requestError.message) }
   }
 
+  async function loadAdminSummary() {
+    try { setAdminSummary(await api('/admin/dashboard', { token })) } catch (requestError) { showError(requestError.message) }
+  }
+
   async function updateRole(id, role) {
     try {
       await api(`/admin/users/${id}`, { token, method: 'PATCH', body: JSON.stringify({ role }) })
-      await loadUsers()
+      await Promise.all([loadUsers(), loadAdminSummary()])
       showMessage('User role updated.')
     } catch (requestError) { showError(requestError.message) }
   }
@@ -356,7 +361,10 @@ function App() {
     setTab(nextTab)
     setToast(null)
     if (nextTab === 'appointments') loadAppointments()
-    if (nextTab === 'admin' && user?.role === 'admin') loadUsers()
+    if (nextTab === 'admin' && user?.role === 'admin') {
+      loadUsers()
+      loadAdminSummary()
+    }
   }
 
   return (
@@ -525,8 +533,8 @@ function App() {
         </section>}
 
         {user?.role === 'admin' && tab === 'admin' && <section className="dashboard-section container-fluid py-5 px-4 px-lg-5">
-          <div className="section-heading row align-items-center"><div className="col"><p className="eyebrow">THE SALON, AT A GLANCE</p><h2>Maison <em>dashboard.</em></h2></div><div className="col-auto"><span className="admin-badge">ADMIN VIEW</span></div></div>
-          <div className="stat-grid row row-cols-2 row-cols-lg-4 g-0">{[['UPCOMING & PAST', appointments.length, 'appointments in the system'], ['OUR SERVICES', services.length, 'services available to book'], ['OUR PEOPLE', staff.length, 'active stylists'], ['REVIEWS', reviews.length, 'client experiences shared']].map(([label, count, caption]) => <div className="col" key={label}><div className="stat-card"><span>{label}</span><strong>{count}</strong><small>{caption}</small></div></div>)}</div>
+          <div className="section-heading row align-items-center"><div className="col"><p className="eyebrow">THE SALON, AT A GLANCE</p><h2>Maison <em>dashboard.</em></h2></div><div className="col-auto d-flex align-items-center gap-2"><button className="btn btn-outline-dark btn-sm" onClick={loadAdminSummary}>Refresh overview</button><span className="admin-badge">ADMIN VIEW</span></div></div>
+          <div className="stat-grid row row-cols-2 row-cols-lg-4 g-0">{[['APPOINTMENTS', adminSummary?.appointments ?? appointments.length, `${adminSummary?.todayAppointments ?? 0} scheduled today`], ['OUR SERVICES', adminSummary?.services ?? services.length, 'services available to book'], ['OUR PEOPLE', adminSummary?.staff ?? staff.length, 'active stylists'], ['REVIEWS', adminSummary?.reviews ?? reviews.length, 'client experiences shared']].map(([label, count, caption]) => <div className="col" key={label}><div className="stat-card"><span>{label}</span><strong>{count}</strong><small>{caption}</small></div></div>)}</div>
           <div className="admin-columns row g-3">
             <div className="col-lg-6"><div className="admin-panel card h-100"><div className="panel-title"><div><p className="eyebrow">SERVICE MENU</p><h3>Add a service</h3></div></div><form className="stack-form" onSubmit={createService}><input className="form-control" required placeholder="Service name" value={serviceForm.name} onChange={(event) => setServiceForm({ ...serviceForm, name: event.target.value })} /><input className="form-control" placeholder="Description" value={serviceForm.description} onChange={(event) => setServiceForm({ ...serviceForm, description: event.target.value })} /><div className="form-row row g-2"><label className="col">Minutes<input className="form-control" required type="number" min="5" value={serviceForm.durationMinutes} onChange={(event) => setServiceForm({ ...serviceForm, durationMinutes: event.target.value })} /></label><label className="col">Price<input className="form-control" required type="number" min="0" step="0.01" value={serviceForm.price} onChange={(event) => setServiceForm({ ...serviceForm, price: event.target.value })} /></label></div><button className="btn btn-dark align-self-start">Add service +</button></form>
               <div className="admin-service-list">{services.map((service) => <div key={service.id}><span>{service.name}</span><b>${Number(service.price).toFixed(2)}</b></div>)}</div>
@@ -538,7 +546,7 @@ function App() {
             </div>
             </div>
           </div>
-          <div className="admin-panel card full-panel"><div className="panel-title d-flex justify-content-between align-items-center"><div><p className="eyebrow">TODAY, TOMORROW, AND WHAT'S NEXT</p><h3>Appointment management</h3></div><button className="btn btn-outline-dark btn-sm" onClick={() => loadAppointments()}>Refresh</button></div>
+          <div className="admin-panel card full-panel"><div className="panel-title d-flex justify-content-between align-items-center"><div><p className="eyebrow">TODAY, TOMORROW, AND WHAT'S NEXT</p><h3>Appointment management</h3></div><button className="btn btn-outline-dark btn-sm" onClick={() => { loadAppointments(); loadAdminSummary() }}>Refresh</button></div>
             {appointments.map((appointment) => <div className="admin-appointment row align-items-center g-2" key={appointment.id}><div className="col-md-4"><strong>{appointment.customer_name}</strong><span>{appointment.service_name} · {appointment.staff_name}</span></div><span className="col-md-3">{appointment.appointment_date} · {appointment.start_time.slice(0, 5)}</span><span className={`status-pill col-auto ${appointment.status}`}>{appointment.status}</span>{appointment.status === 'confirmed' && <button className="btn btn-sm btn-link col-auto" onClick={() => completeAppointment(appointment.id)}>Mark completed</button>}</div>)}
             {!appointments.length && <p className="empty-copy">No appointments yet.</p>}
           </div>

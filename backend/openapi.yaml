@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Salon Appointment Booking API
   version: 1.0.0
-  description: Express/MySQL salon scheduling API. Protected endpoints require a bearer JWT.
+  description: Express and Sequelize salon scheduling API backed by MySQL. Protected endpoints require a bearer JWT. Role restrictions are documented per operation. Email confirmations and reminders require SMTP settings; online checkout requires Stripe keys.
 servers:
   - url: http://localhost:4000/api
 security:
@@ -122,7 +122,7 @@ paths:
   /staff:
     get:
       security: []
-      summary: List active staff and their services
+      summary: List active staff, assigned services, specializations, and weekly working hours
       responses:
         '200': { description: Staff list }
     post:
@@ -366,6 +366,26 @@ paths:
       summary: List users (admin)
       responses:
         '200': { description: Users }
+  /admin/dashboard:
+    get:
+      summary: Get salon dashboard counts and upcoming appointments (admin)
+      responses:
+        '200':
+          description: Dashboard summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users: { type: integer }
+                  services: { type: integer }
+                  staff: { type: integer }
+                  reviews: { type: integer }
+                  appointments: { type: integer }
+                  todayAppointments: { type: integer }
+                  upcomingAppointments:
+                    type: array
+                    items: { type: object }
   /admin/users/{id}:
     patch:
       summary: Update user name or role (admin)

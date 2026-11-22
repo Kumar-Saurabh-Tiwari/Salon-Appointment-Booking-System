@@ -1,6 +1,6 @@
 require('dotenv').config();
 
-const { pool, initializeSchema } = require('./server');
+const { sequelize, initializeSchema, Service, Staff, StaffService, StaffAvailability } = require('./database/schema');
 
 const demoServices = [
   ['Signature haircut', 'A tailored cut and finish for your style.', 45, 45],
@@ -16,50 +16,37 @@ const demoServices = [
 
 async function seedDemo() {
   await initializeSchema();
-  const connection = await pool.getConnection();
-  try {
-    await connection.beginTransaction();
-    const [[serviceCount]] = await connection.query('SELECT COUNT(*) AS count FROM services');
-    const [[staffCount]] = await connection.query('SELECT COUNT(*) AS count FROM staff');
-    if (Number(serviceCount.count) || Number(staffCount.count)) {
-      await connection.rollback();
+  await sequelize.transaction(async (transaction) => {
+    const [serviceCount, staffCount] = await Promise.all([
+      Service.count({ transaction }),
+      Staff.count({ transaction }),
+    ]);
+    if (serviceCount || staffCount) {
       console.log('Existing services or staff found; demo catalog was not added.');
       return;
     }
 
-    const serviceIds = [];
-    for (const [name, description, duration, price] of demoServices) {
-      const [result] = await connection.execute(
-        'INSERT INTO services (name, description, duration_minutes, price) VALUES (?, ?, ?, ?)',
-        [name, description, duration, price],
-      );
-      serviceIds.push(result.insertId);
-    }
-    const [staffResult] = await connection.execute(
-      'INSERT INTO staff (name, bio, specializations) VALUES (?, ?, ?)',
-      ['Alex Morgan', 'A friendly stylist for your next little reset.', JSON.stringify(['Hair', 'Nails', 'Brows', 'Skincare', 'Massage', 'Makeup'])],
-    );
-    const staffId = staffResult.insertId;
-    for (const serviceId of serviceIds) {
-      await connection.execute(
-        'INSERT INTO staff_services (staff_id, service_id) VALUES (?, ?)',
-        [staffId, serviceId],
-      );
-    }
-    for (let weekday = 0; weekday <= 6; weekday += 1) {
-      await connection.execute(
-        'INSERT INTO staff_availability (staff_id, weekday, start_time, end_time) VALUES (?, ?, ?, ?)',
-        [staffId, weekday, weekday === 0 || weekday === 6 ? '10:00:00' : '09:00:00', weekday === 0 || weekday === 6 ? '16:00:00' : '17:00:00'],
-      );
-    }
-    await connection.commit();
+    const services = await Service.bulkCreate(demoServices.map(([name, description, duration_minutes, price]) => ({
+      name, description, duration_minutes, price,
+    })), { transaction });
+    const member = await Staff.create({
+      name: 'Alex Morgan',
+      bio: 'A friendly stylist for your next little reset.',
+      specializations: ['Hair', 'Nails', 'Brows', 'Skincare', 'Massage', 'Makeup'],
+    }, { transaction });
+    await StaffService.bulkCreate(services.map((service) => ({
+      staff_id: member.id,
+      service_id: service.id,
+    })), { transaction });
+    const availability = Array.from({ length: 7 }, (_, weekday) => ({
+      staff_id: member.id,
+      weekday,
+      start_time: weekday === 0 || weekday === 6 ? '10:00:00' : '09:00:00',
+      end_time: weekday === 0 || weekday === 6 ? '16:00:00' : '17:00:00',
+    }));
+    await StaffAvailability.bulkCreate(availability, { transaction });
     console.log(`Added ${demoServices.length} demo services, one stylist, and weekly availability.`);
-  } catch (error) {
-    await connection.rollback();
-    throw error;
-  } finally {
-    connection.release();
-  }
+  });
 }
 
 seedDemo()
@@ -67,4 +54,4 @@ seedDemo()
     console.error('Failed to seed demo catalog:', error);
     process.exitCode = 1;
   })
-  .finally(() => pool.end());
+  .finally(() => sequelize.close());

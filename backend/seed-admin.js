@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const bcrypt = require('bcryptjs');
-const { pool, initializeSchema } = require('./server');
+const { initializeSchema, sequelize, User } = require('./database/schema');
 
 async function seedAdmin() {
   const { ADMIN_NAME, ADMIN_EMAIL, ADMIN_PASSWORD } = process.env;
@@ -10,11 +10,11 @@ async function seedAdmin() {
   }
   await initializeSchema();
   const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, 12);
-  await pool.execute(
-    `INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, 'admin')
-     ON DUPLICATE KEY UPDATE name = VALUES(name), password_hash = VALUES(password_hash), role = 'admin'`,
-    [ADMIN_NAME.trim(), ADMIN_EMAIL.trim().toLowerCase(), passwordHash],
-  );
+  const [user, created] = await User.findOrCreate({
+    where: { email: ADMIN_EMAIL.trim().toLowerCase() },
+    defaults: { name: ADMIN_NAME.trim(), password_hash: passwordHash, role: 'admin' },
+  });
+  if (!created) await user.update({ name: ADMIN_NAME.trim(), password_hash: passwordHash, role: 'admin' });
   console.log(`Administrator account ready: ${ADMIN_EMAIL.trim().toLowerCase()}`);
 }
 
@@ -23,4 +23,4 @@ seedAdmin()
     console.error('Failed to seed administrator:', error);
     process.exitCode = 1;
   })
-  .finally(() => pool.end());
+  .finally(() => sequelize.close());
