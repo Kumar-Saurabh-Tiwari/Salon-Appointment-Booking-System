@@ -34,6 +34,7 @@ function App() {
   const [reviews, setReviews] = useState([])
   const [serviceId, setServiceId] = useState('')
   const [staffId, setStaffId] = useState('')
+  const [serviceSearch, setServiceSearch] = useState('')
   const [date, setDate] = useState(tomorrow)
   const [selectedSlot, setSelectedSlot] = useState(null)
   const [message, setMessage] = useState('')
@@ -47,6 +48,11 @@ function App() {
   const [scheduleForm, setScheduleForm] = useState({ staffId: '', weekday: 1, startTime: '09:00', endTime: '17:00' })
 
   const activeService = useMemo(() => services.find((service) => String(service.id) === String(serviceId)), [services, serviceId])
+  const filteredServices = useMemo(() => {
+    const query = serviceSearch.trim().toLowerCase()
+    if (!query) return services
+    return services.filter((service) => `${service.name} ${service.description || ''}`.toLowerCase().includes(query))
+  }, [services, serviceSearch])
 
   const fetchCatalog = useCallback(() => Promise.all([
     api('/services'), api('/staff'), api('/reviews'),
@@ -310,9 +316,9 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="topbar navbar navbar-expand-lg">
+      <header className="topbar navbar navbar-expand-lg" id="top">
         <div className="container-fluid px-0">
-        <a className="brand" href="#" onClick={() => changeTab('book')} aria-label="Maison home">
+        <a className="brand" href="#top" onClick={() => changeTab('book')} aria-label="Maison home">
           <span className="brand-mark">m</span>
           <span>maison<span className="brand-period">.</span></span>
         </a>
@@ -333,9 +339,9 @@ function App() {
           <div className="row align-items-center g-4">
           <div className="hero-copy col-lg-5">
             <p className="eyebrow">YOUR MOMENT, WELL SPENT</p>
-            <h1>A little time<br />for <em>yourself.</em></h1>
-            <p className="hero-description">Thoughtful hair, skin and beauty rituals, made just for you.</p>
-            <button className="btn btn-dark" onClick={() => document.getElementById('booking')?.scrollIntoView({ behavior: 'smooth' })}>Explore our services <span aria-hidden="true">↗</span></button>
+            <h1>Make room<br />for <em>feeling good.</em></h1>
+            <p className="hero-description">Discover thoughtful hair, skin and beauty rituals, then book a time that works for you.</p>
+            <button className="btn btn-dark" onClick={() => document.getElementById('booking')?.scrollIntoView({ behavior: 'smooth' })}>Find your appointment <span aria-hidden="true">↗︎</span></button>
           </div>
           <div className="hero-art col-lg-6 offset-lg-1" role="img" aria-label="Warm, sunlit salon interior">
             <div className="hero-art-sun" />
@@ -356,17 +362,29 @@ function App() {
           </div>
           <div className="booking-layout row g-4 g-xl-5">
             <div className="service-list col-lg-7">
-              <div className="list-heading"><span>OUR SERVICES</span><span>{String(services.length).padStart(2, '0')} RITUALS</span></div>
+              <div className="list-heading"><span>EXPLORE TREATMENTS</span><span>{String(filteredServices.length).padStart(2, '0')} AVAILABLE</span></div>
+              <label className="service-search">
+                <span aria-hidden="true">⌕</span>
+                <input
+                  type="search"
+                  aria-label="Search treatments"
+                  placeholder="Search hair, skin and beauty"
+                  value={serviceSearch}
+                  onChange={(event) => setServiceSearch(event.target.value)}
+                />
+                {serviceSearch && <button type="button" onClick={() => setServiceSearch('')} aria-label="Clear treatment search">×</button>}
+              </label>
               {services.length === 0 && <p className="empty-copy">Our service menu is being prepared. Please check back soon.</p>}
-              {services.map((service, index) => (
+                {filteredServices.map((service, index) => (
                 <button key={service.id} className={`service-row d-flex align-items-center gap-3 ${String(service.id) === String(serviceId) ? 'selected' : ''}`} onClick={() => { setSelectedSlot(null); setSlots([]); setServiceId(String(service.id)) }}>
                   <span className="service-number flex-shrink-0">0{index + 1}</span>
                   <span className="service-main flex-grow-1 d-flex flex-column gap-2"><strong>{service.name}</strong><small>{service.description || `${service.duration_minutes} minutes of care`}</small></span>
                   <span className="service-meta flex-shrink-0">{service.duration_minutes} min<br /><b>${Number(service.price).toFixed(2)}</b></span>
-                  <span className="row-arrow flex-shrink-0" aria-hidden="true">↗</span>
+                  <span className="row-arrow flex-shrink-0" aria-hidden="true">↗︎</span>
                 </button>
               ))}
-              <div className="booking-aside-note"><span>✳</span> A beautiful appointment begins with choosing what feels right.</div>
+              {services.length > 0 && filteredServices.length === 0 && <p className="empty-copy">No treatments match “{serviceSearch}”. Try another search.</p>}
+              <div className="booking-aside-note"><span>✳︎</span> A beautiful appointment begins with choosing what feels right.</div>
             </div>
 
             <div className="booking-card card shadow-sm col-lg-5 p-4">
@@ -386,8 +404,15 @@ function App() {
                     return <div className="col" key={`${slot.staffId}-${slot.startTime}`}><button type="button" className={`time-slot btn btn-sm w-100 ${selected ? 'btn-dark' : 'btn-outline-secondary'}`} onClick={() => setSelectedSlot(slot)} title={`${slot.staffName} · ${slot.startTime}`}>{slot.startTime}</button></div>
                   }) : <p className="empty-copy slots-empty">{serviceId ? 'No times available for this day. Try another date.' : 'Select a service to find a time.'}</p>}
                 </div>
-                <button className="btn btn-dark book-button" type="submit" disabled={!selectedSlot || loading || !user}>
-                  {loading ? 'Booking…' : !user ? 'Sign in to book' : 'Confirm appointment'} <span aria-hidden="true">↗</span>
+                <button
+                  className="btn btn-dark book-button"
+                  type={user ? 'submit' : 'button'}
+                  disabled={loading || (Boolean(user) && !selectedSlot)}
+                  onClick={() => {
+                    if (!user) document.getElementById('account')?.scrollIntoView({ behavior: 'smooth' })
+                  }}
+                >
+                  {loading ? 'Booking…' : !user ? 'Sign in to book' : 'Confirm appointment'} <span aria-hidden="true">↗︎</span>
                 </button>
                 {!user && <p className="form-hint">Your appointment is just a sign-in away.</p>}
               </form>
@@ -396,7 +421,7 @@ function App() {
         </section>
 
         <section className="promise-band d-flex flex-column align-items-center justify-content-center">
-          <div className="promise-star">✳</div><p>Little rituals. <em>Lasting</em> confidence.</p><span>MADE WITH CARE, ALWAYS</span>
+          <div className="promise-star">✳︎</div><p>Little rituals. <em>Lasting</em> confidence.</p><span>MADE WITH CARE, ALWAYS</span>
         </section>
 
         <section className="reviews-section container-fluid py-5 px-4 px-lg-5">
@@ -416,13 +441,13 @@ function App() {
             <input className="form-control" required type="email" placeholder="Email address" value={auth.email} onChange={(event) => setAuth({ ...auth, email: event.target.value })} />
             {authMode === 'register' && <input className="form-control" type="tel" placeholder="Phone (optional)" value={auth.phone} onChange={(event) => setAuth({ ...auth, phone: event.target.value })} />}
             <input className="form-control" required type="password" minLength="8" placeholder="Password (8+ characters)" value={auth.password} onChange={(event) => setAuth({ ...auth, password: event.target.value })} />
-            <button className="btn btn-dark w-100" type="submit" disabled={loading}>{loading ? 'Please wait…' : authMode === 'login' ? 'Sign in' : 'Create my account'} <span aria-hidden="true">↗</span></button>
+            <button className="btn btn-dark w-100" type="submit" disabled={loading}>{loading ? 'Please wait…' : authMode === 'login' ? 'Sign in' : 'Create my account'} <span aria-hidden="true">↗︎</span></button>
           </form>
           </div>
         </section>}
 
         {user && tab === 'appointments' && <section className="dashboard-section container-fluid py-5 px-4 px-lg-5">
-          <div className="section-heading row align-items-center"><div className="col"><p className="eyebrow">YOUR VISITS</p><h2>Appointments, <em>your way.</em></h2></div><div className="col-auto"><button className="btn btn-outline-dark" onClick={() => changeTab('book')}>Book another visit ↗</button></div></div>
+          <div className="section-heading row align-items-center"><div className="col"><p className="eyebrow">YOUR VISITS</p><h2>Appointments, <em>your way.</em></h2></div><div className="col-auto"><button className="btn btn-outline-dark" onClick={() => changeTab('book')}>Book another visit ↗︎</button></div></div>
           {appointments.length ? <div className="appointment-list list-group list-group-flush">{appointments.map((appointment) => <article className="appointment-card list-group-item row align-items-center g-2" key={appointment.id}>
             <div className="appointment-date col-auto"><span>{new Date(`${appointment.appointment_date}T12:00:00`).toLocaleDateString('en-US', { month: 'short' }).toUpperCase()}</span><strong>{new Date(`${appointment.appointment_date}T12:00:00`).getDate()}</strong></div>
             <div className="appointment-info col"><h3>{appointment.service_name}</h3><p>{appointment.staff_name} · {appointment.start_time.slice(0, 5)} · {appointment.duration_minutes} min</p></div>
@@ -434,7 +459,7 @@ function App() {
               {appointment.status === 'completed' && <button className="btn btn-sm btn-link" onClick={() => review(appointment.id)}>Leave a review</button>}
               {appointment.status === 'completed' && <a className="btn btn-sm btn-link" href={`${API_URL}/appointments/${appointment.id}/invoice`} onClick={(event) => { event.preventDefault(); api(`/appointments/${appointment.id}/invoice`, { token }).then((invoice) => showMessage(`Invoice ${invoice.invoice_number} · $${Number(invoice.amount).toFixed(2)}`)).catch((requestError) => showError(requestError.message)) }}>Invoice</a>}
             </div>
-          </article>)}</div> : <div className="empty-panel"><span>✳</span><h3>Your next little ritual awaits.</h3><p>When you book a visit, you’ll find it here.</p><button className="btn btn-dark" onClick={() => changeTab('book')}>Explore services ↗</button></div>}
+          </article>)}</div> : <div className="empty-panel"><span>✳︎</span><h3>Your next little ritual awaits.</h3><p>When you book a visit, you’ll find it here.</p><button className="btn btn-dark" onClick={() => changeTab('book')}>Explore services ↗︎</button></div>}
           <form className="profile-form card row row-cols-1 row-cols-lg-4 g-3 p-3 p-lg-4 mt-4" onSubmit={saveProfile}><div className="col"><p className="eyebrow">PROFILE DETAILS</p><h3>Your details</h3></div><div className="col"><input className="form-control" aria-label="Name" value={profile.name} onChange={(event) => setProfile({ ...profile, name: event.target.value })} /></div><div className="col"><input className="form-control" aria-label="Phone" value={profile.phone} placeholder="Phone" onChange={(event) => setProfile({ ...profile, phone: event.target.value })} /></div><div className="col"><button className="btn btn-outline-dark" type="submit">Save profile</button></div></form>
         </section>}
 
@@ -463,7 +488,7 @@ function App() {
         </section>}
       </main>
 
-      <footer className="footer container-fluid d-flex align-items-center justify-content-between flex-wrap gap-3"><a className="brand" href="#"><span className="brand-mark">m</span><span>maison<span className="brand-period">.</span></span></a><span>YOUR TIME, BEAUTIFULLY SPENT.</span><span>© {new Date().getFullYear()} MAISON SALON</span></footer>
+      <footer className="footer container-fluid d-flex align-items-center justify-content-between flex-wrap gap-3"><a className="brand" href="#top"><span className="brand-mark">m</span><span>maison<span className="brand-period">.</span></span></a><span>YOUR TIME, BEAUTIFULLY SPENT.</span><span>© {new Date().getFullYear()} MAISON SALON</span></footer>
     </div>
   )
 }

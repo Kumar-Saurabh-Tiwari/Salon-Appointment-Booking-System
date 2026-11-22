@@ -1,18 +1,18 @@
 :root {
   font-family: 'Segoe UI', Arial, sans-serif;
-  color: #292a24;
-  background: #faf8f3;
+  color: #211d2b;
+  background: #fff;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  --paper: #faf8f3;
-  --cream: #f0ece3;
-  --ink: #292a24;
-  --muted: #827d71;
-  --rust: #a46142;
-  --deep: #38372f;
-  --line: #e7e2d9;
-  --line-dark: #c9c2b5;
+  --paper: #fff;
+  --cream: #f5f3ff;
+  --ink: #211d2b;
+  --muted: #716d7b;
+  --rust: #6741c8;
+  --deep: #272036;
+  --line: #e9e6f0;
+  --line-dark: #c9c3d6;
   --sans: 'Segoe UI', Arial, sans-serif;
   --serif: Georgia, 'Times New Roman', serif;
 }
@@ -28,8 +28,8 @@ body {
 button, input, select { font: inherit; }
 button { cursor: pointer; }
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
-  outline: 2px solid #a46142;
+  outline: 2px solid #6741c8;
   outline-offset: 3px;
 }
 
-::selection { color: white; background: #a46142; }
+::selection { color: white; background: #6741c8; }
