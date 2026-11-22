@@ -253,6 +253,10 @@ h2 { font: 650 clamp(30px, 3.4vw, 44px)/1.12 var(--sans); letter-spacing: -1.8px
 .section-heading > p, .account-section > .row > div > p:last-child { font-size: 13px; }
 .booking-layout { max-width: 1320px; margin-right: auto; margin-left: auto; }
 .list-heading { align-items: center; padding-bottom: 15px; color: #777181; font-size: 10px; font-weight: 700; letter-spacing: .8px; }
+.category-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 15px 0 7px; }
+.category-chip { min-height: 34px; padding: 0 14px; border: 1px solid #e6e2eb; border-radius: 100px; color: #514c5d; background: #fff; font-size: 11px; font-weight: 500; transition: background .15s ease, color .15s ease, border-color .15s ease; }
+.category-chip:hover { border-color: #b7a7ea; background: #faf8ff; }
+.category-chip.active { border-color: var(--ink); color: #fff; background: var(--ink); }
 .service-search {
   display: flex;
   min-height: 52px;
@@ -289,6 +293,7 @@ h2 { font: 650 clamp(30px, 3.4vw, 44px)/1.12 var(--sans); letter-spacing: -1.8px
 .form-control:focus, .form-select:focus { border-color: #9c84e2; box-shadow: 0 0 0 .2rem rgba(103, 65, 200, .12); }
 .slot-grid { margin-top: 8px; }
 .time-slot { min-height: 38px; border-radius: 10px; font-size: 11px; }
+.slots-empty { grid-column: 1 / -1; margin: 4px 0 12px; }
 .book-button { min-height: 47px; }
 .form-hint { font-size: 10px; }
 .empty-copy { font: 400 13px/1.6 var(--sans); }
@@ -321,6 +326,43 @@ h2 { font: 650 clamp(30px, 3.4vw, 44px)/1.12 var(--sans); letter-spacing: -1.8px
 .empty-panel > span { color: var(--rust); }
 .footer { min-height: 90px; padding-right: max(5%, calc((100% - 1320px) / 2)); padding-left: max(5%, calc((100% - 1320px) / 2)); background: #fff; }
 .footer .brand { font-size: 19px; }
+.toast-notice {
+  position: fixed;
+  z-index: 1050;
+  top: 94px;
+  right: 24px;
+  display: flex;
+  width: min(390px, calc(100vw - 32px));
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #e8e3ee;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 14px 40px rgba(34, 27, 49, .16);
+  animation: toast-enter .2s ease-out;
+}
+.toast-notice.error { border-left: 4px solid #bd615c; }
+.toast-notice.success { border-left: 4px solid #548767; }
+.toast-icon {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  place-items: center;
+  border-radius: 50%;
+  color: #8e4541;
+  background: #f9eeed;
+  font-size: 13px;
+  font-weight: 700;
+}
+.toast-notice.success .toast-icon { color: #416c50; background: #edf5ef; }
+.toast-notice p { flex: 1; margin: 2px 0 0; color: var(--ink); font-size: 13px; line-height: 1.5; }
+.toast-notice > button { width: 26px; height: 26px; flex: 0 0 26px; padding: 0; border: 0; border-radius: 50%; color: #777181; background: #f5f3f8; font-size: 20px; line-height: 1; }
+@keyframes toast-enter {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 
 @media (max-width: 991.98px) {
   .topbar { padding: 10px 5%; }
@@ -337,6 +379,7 @@ h2 { font: 650 clamp(30px, 3.4vw, 44px)/1.12 var(--sans); letter-spacing: -1.8px
   .account-area { order: 2; }
 }
 @media (max-width: 575.98px) {
+  .toast-notice { top: 16px; right: 16px; }
   .topbar { position: relative; }
   .hero { padding: 36px 6% 60px; }
   .hero h1 { font-size: 48px; letter-spacing: -2.6px; }

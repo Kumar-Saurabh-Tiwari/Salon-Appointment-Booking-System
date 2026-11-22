@@ -35,6 +35,8 @@ Requirements: Node.js 20+, MySQL 8+, and npm.
 
 The API creates the required tables on startup. Add services and staff in the admin view, assign services to staff, and set each staff member's weekly working hours before making customer bookings.
 
+To populate an empty local database with example treatments, a sample stylist, and weekly availability, run `npm run seed:demo` from `backend`. The command only adds demo data when both the services and staff tables are empty; it will not overwrite an existing catalog.
+
 ## API
 
 All routes are prefixed with `/api`. The interactive frontend is a demo client; the API contract is also available as [OpenAPI](./backend/openapi.yaml).

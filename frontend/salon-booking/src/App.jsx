@@ -4,6 +4,20 @@ import './App.css'
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000/api'
 const today = new Date().toLocaleDateString('en-CA')
 const tomorrow = new Date(Date.now() + 86400000).toLocaleDateString('en-CA')
+const categoryOrder = ['Hair', 'Nails', 'Hair removal', 'Brows & lashes', 'Facials & skincare', 'Massage', 'Makeup', 'Medspa & aesthetics']
+
+function getServiceCategory(service) {
+  const text = `${service.name} ${service.description || ''}`.toLowerCase()
+  if (/brow|lash/.test(text)) return 'Brows & lashes'
+  if (/wax|hair removal|laser/.test(text)) return 'Hair removal'
+  if (/medspa|aesthetic/.test(text)) return 'Medspa & aesthetics'
+  if (/facial|skin|skincare/.test(text)) return 'Facials & skincare'
+  if (/nail|manicure|pedicure/.test(text)) return 'Nails'
+  if (/massage/.test(text)) return 'Massage'
+  if (/makeup|make-up/.test(text)) return 'Makeup'
+  if (/hair|cut|blow.?dry|balayage|color|colour|styling/.test(text)) return 'Hair'
+  return 'Other'
+}
 
 async function api(path, { token, ...options } = {}) {
   const response = await fetch(`${API_URL}${path}`, {
@@ -18,6 +32,17 @@ async function api(path, { token, ...options } = {}) {
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(payload.error || 'The request could not be completed.')
   return payload
+}
+
+function friendlyErrorMessage(error) {
+  const message = typeof error === 'string' ? error : error?.message
+  if (/email or password is incorrect|invalid credentials/i.test(message || '')) {
+    return 'We couldn’t sign you in. Check your email and password, then try again.'
+  }
+  if (/failed to fetch|networkerror|load failed/i.test(message || '')) {
+    return 'We couldn’t reach the salon just now. Check your connection and try again.'
+  }
+  return message || 'Something went wrong. Please try again.'
 }
 
 function App() {
@@ -35,10 +60,11 @@ function App() {
   const [serviceId, setServiceId] = useState('')
   const [staffId, setStaffId] = useState('')
   const [serviceSearch, setServiceSearch] = useState('')
+  const [serviceCategory, setServiceCategory] = useState('All')
   const [date, setDate] = useState(tomorrow)
   const [selectedSlot, setSelectedSlot] = useState(null)
-  const [message, setMessage] = useState('')
-  const [error, setError] = useState('')
+  const [loadedAvailabilityKey, setLoadedAvailabilityKey] = useState('')
+  const [toast, setToast] = useState(null)
   const [loading, setLoading] = useState(false)
   const [authMode, setAuthMode] = useState('login')
   const [auth, setAuth] = useState({ name: '', email: '', password: '', phone: '' })
@@ -47,12 +73,24 @@ function App() {
   const [staffForm, setStaffForm] = useState({ name: '', bio: '', specializations: '' })
   const [scheduleForm, setScheduleForm] = useState({ staffId: '', weekday: 1, startTime: '09:00', endTime: '17:00' })
 
+  useEffect(() => {
+    if (!toast) return undefined
+    const timeout = window.setTimeout(() => setToast(null), toast.type === 'error' ? 6500 : 4000)
+    return () => window.clearTimeout(timeout)
+  }, [toast])
+
   const activeService = useMemo(() => services.find((service) => String(service.id) === String(serviceId)), [services, serviceId])
+  const availabilityKey = `${serviceId}|${date}|${staffId}`
+  const availabilityLoading = Boolean(serviceId && date && availabilityKey !== loadedAvailabilityKey)
+  const availableCategories = ['All', ...categoryOrder]
   const filteredServices = useMemo(() => {
     const query = serviceSearch.trim().toLowerCase()
-    if (!query) return services
-    return services.filter((service) => `${service.name} ${service.description || ''}`.toLowerCase().includes(query))
-  }, [services, serviceSearch])
+    return services.filter((service) => {
+      const matchesQuery = !query || `${service.name} ${service.description || ''}`.toLowerCase().includes(query)
+      const matchesCategory = serviceCategory === 'All' || getServiceCategory(service) === serviceCategory
+      return matchesQuery && matchesCategory
+    })
+  }, [services, serviceSearch, serviceCategory])
 
   const fetchCatalog = useCallback(() => Promise.all([
     api('/services'), api('/staff'), api('/reviews'),
@@ -66,7 +104,7 @@ function App() {
       setReviews(reviewList)
       setServiceId((current) => current || String(serviceList[0]?.id || ''))
     } catch (requestError) {
-      setError(requestError.message)
+      showError(requestError)
     }
   }, [fetchCatalog])
 
@@ -75,7 +113,7 @@ function App() {
     try {
       setAppointments(await api('/appointments', { token: currentToken }))
     } catch (requestError) {
-      setError(requestError.message)
+      showError(requestError)
     }
   }, [token])
 
@@ -88,7 +126,7 @@ function App() {
       setReviews(reviewList)
       setServiceId((current) => current || String(serviceList[0]?.id || ''))
     }).catch((requestError) => {
-      if (active) setError(requestError.message)
+      if (active) showError(requestError)
     })
     return () => { active = false }
   }, [fetchCatalog])
@@ -111,20 +149,27 @@ function App() {
   useEffect(() => {
     if (!serviceId || !date) return
     let active = true
+    const requestedAvailabilityKey = `${serviceId}|${date}|${staffId}`
     api(`/availability?serviceId=${serviceId}&date=${date}${staffId ? `&staffId=${staffId}` : ''}`)
-      .then((availableSlots) => { if (active) setSlots(availableSlots) })
-      .catch((requestError) => { if (active) setError(requestError.message) })
+      .then((availableSlots) => {
+        if (!active) return
+        setSlots(availableSlots)
+        setLoadedAvailabilityKey(requestedAvailabilityKey)
+      })
+      .catch((requestError) => {
+        if (!active) return
+        setLoadedAvailabilityKey(requestedAvailabilityKey)
+        showError(requestError)
+      })
     return () => { active = false }
   }, [serviceId, staffId, date])
 
   function showError(text) {
-    setError(text)
-    setMessage('')
+    setToast({ type: 'error', text: friendlyErrorMessage(text) })
   }
 
   function showMessage(text) {
-    setMessage(text)
-    setError('')
+    setToast({ type: 'success', text })
   }
 
   async function submitAuth(event) {
@@ -167,6 +212,7 @@ function App() {
         body: JSON.stringify({ serviceId: Number(serviceId), staffId: selectedSlot.staffId, date, startTime: selectedSlot.startTime }),
       })
       showMessage(`Booking confirmed for ${date} at ${selectedSlot.startTime}.`)
+      setSlots((current) => current.filter((slot) => slot.staffId !== selectedSlot.staffId || slot.startTime !== selectedSlot.startTime))
       setSelectedSlot(null)
       await loadAppointments()
       setTab('appointments')
@@ -308,8 +354,7 @@ function App() {
 
   function changeTab(nextTab) {
     setTab(nextTab)
-    setMessage('')
-    setError('')
+    setToast(null)
     if (nextTab === 'appointments') loadAppointments()
     if (nextTab === 'admin' && user?.role === 'admin') loadUsers()
   }
@@ -352,8 +397,13 @@ function App() {
           <div className="hero-footnote"><span>01 — 03</span><span>GOOD HAIR. GOOD SKIN. GOOD ENERGY.</span></div>
         </section>
 
-        {error && <div className="notice alert alert-danger alert-dismissible" role="alert">{error}<button type="button" className="btn-close" onClick={() => setError('')} aria-label="Dismiss error" /></div>}
-        {message && <div className="notice alert alert-success alert-dismissible" role="status">{message}<button type="button" className="btn-close" onClick={() => setMessage('')} aria-label="Dismiss message" /></div>}
+        {toast && (
+          <div className={`toast-notice ${toast.type}`} role={toast.type === 'error' ? 'alert' : 'status'} aria-live={toast.type === 'error' ? 'assertive' : 'polite'}>
+            <span className="toast-icon" aria-hidden="true">{toast.type === 'error' ? '!' : '✓'}</span>
+            <p>{toast.text}</p>
+            <button type="button" onClick={() => setToast(null)} aria-label="Dismiss notification">×</button>
+          </div>
+        )}
 
         <section className="booking-section container-fluid py-5 px-4 px-lg-5" id="booking">
           <div className="section-heading row align-items-end mb-4">
@@ -363,6 +413,17 @@ function App() {
           <div className="booking-layout row g-4 g-xl-5">
             <div className="service-list col-lg-7">
               <div className="list-heading"><span>EXPLORE TREATMENTS</span><span>{String(filteredServices.length).padStart(2, '0')} AVAILABLE</span></div>
+              {availableCategories.length > 1 && <div className="category-filters" aria-label="Treatment categories">
+                {availableCategories.map((category) => (
+                  <button
+                    className={serviceCategory === category ? 'category-chip active' : 'category-chip'}
+                    key={category}
+                    type="button"
+                    aria-pressed={serviceCategory === category}
+                    onClick={() => setServiceCategory(category)}
+                  >{category}</button>
+                ))}
+              </div>}
               <label className="service-search">
                 <span aria-hidden="true">⌕</span>
                 <input
@@ -375,7 +436,7 @@ function App() {
                 {serviceSearch && <button type="button" onClick={() => setServiceSearch('')} aria-label="Clear treatment search">×</button>}
               </label>
               {services.length === 0 && <p className="empty-copy">Our service menu is being prepared. Please check back soon.</p>}
-                {filteredServices.map((service, index) => (
+              {filteredServices.map((service, index) => (
                 <button key={service.id} className={`service-row d-flex align-items-center gap-3 ${String(service.id) === String(serviceId) ? 'selected' : ''}`} onClick={() => { setSelectedSlot(null); setSlots([]); setServiceId(String(service.id)) }}>
                   <span className="service-number flex-shrink-0">0{index + 1}</span>
                   <span className="service-main flex-grow-1 d-flex flex-column gap-2"><strong>{service.name}</strong><small>{service.description || `${service.duration_minutes} minutes of care`}</small></span>
@@ -399,15 +460,15 @@ function App() {
                 </select>
                 <div className="slot-label"><label>Available times</label>{activeService && <span>{activeService.duration_minutes} min · ${Number(activeService.price).toFixed(2)}</span>}</div>
                 <div className="slot-grid row row-cols-4 g-2">
-                  {slots.length ? slots.map((slot) => {
+                  {availabilityLoading ? <p className="empty-copy slots-empty">Finding available times…</p> : slots.length ? slots.map((slot) => {
                     const selected = selectedSlot?.staffId === slot.staffId && selectedSlot?.startTime === slot.startTime
                     return <div className="col" key={`${slot.staffId}-${slot.startTime}`}><button type="button" className={`time-slot btn btn-sm w-100 ${selected ? 'btn-dark' : 'btn-outline-secondary'}`} onClick={() => setSelectedSlot(slot)} title={`${slot.staffName} · ${slot.startTime}`}>{slot.startTime}</button></div>
-                  }) : <p className="empty-copy slots-empty">{serviceId ? 'No times available for this day. Try another date.' : 'Select a service to find a time.'}</p>}
+                  }) : <p className="empty-copy slots-empty">{serviceId ? 'No times available for this day. Try another date or stylist.' : 'Select a service to find a time.'}</p>}
                 </div>
                 <button
                   className="btn btn-dark book-button"
                   type={user ? 'submit' : 'button'}
-                  disabled={loading || (Boolean(user) && !selectedSlot)}
+                  disabled={loading || (Boolean(user) && (availabilityLoading || !selectedSlot))}
                   onClick={() => {
                     if (!user) document.getElementById('account')?.scrollIntoView({ behavior: 'smooth' })
                   }}
